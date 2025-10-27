@@ -2,10 +2,10 @@ import dash
 from dash import html, dcc, Input, Output, State, callback, ALL, MATCH, callback_context, no_update, clientside_callback, dash_table
 import dash_bootstrap_components as dbc
 import json
-import logging
+import logging # <-- ADDED
 
 # --- MODIFICATION: Import dash.flask to access request headers ---
-import dash.flask
+import flask
 
 # --- MODIFICATION: Import your updated functions ---
 from genieroom import genie_query, record_feedback
@@ -17,7 +17,10 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 load_dotenv()
+# --- ADDED: Set up logger ---
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
 
 # --- MODIFICATION: Helper function to get user token ---
 def get_user_token_from_header():
@@ -27,10 +30,10 @@ def get_user_token_from_header():
         # You may need to change this header name.
         # Common names: 'X-Databricks-User-Token', 'X-Forwarded-Access-Token'
         header_name = 'X-Databricks-User-Token'
-        token = dash.flask.request.headers.get(header_name)
+        token = flask.request.headers.get(header_name)
         
         if token:
-            logger.info(f"Found user token in header '{header_name}'.")
+            # logger.info(f"Found user token in header '{header_name}'.")
             return token
     except Exception as e:
         # This will fail if not in a request context (e.g., on startup)
@@ -49,7 +52,7 @@ app = dash.Dash(
 )
 server = app.server # Expose server for Gunicorn
 
-# ... (DEFAULT_WELCOME_TITLE, DEFAULT_SUGGESTIONS, and app.layout are all unchanged) ...
+# ... (DEFAULT_WELCOME_TITLE, DEFAULT_SUGGESTIONS are all unchanged) ...
 DEFAULT_WELCOME_TITLE = "Supply Chain Optimization"
 DEFAULT_WELCOME_DESCRIPTION = "Analyze your Supply Chain Performance leveraging AI/BI Dashboard. Deep dive into your data and metrics."
 DEFAULT_SUGGESTIONS = [
@@ -285,7 +288,6 @@ def call_llm_for_insights(df, prompt=None):
     Call an LLM to generate insights from a DataFrame.
     NOTE: This uses WorkspaceClient() which will use the environment variables.
     This call will likely run as the Service Principal, NOT the user.
-    This is probably the desired behavior for an "insights" call.
     """
     if prompt is None:
         prompt = (
@@ -298,6 +300,10 @@ def call_llm_for_insights(df, prompt=None):
     full_prompt = f"{prompt}Table data:\n{csv_data}"
     try:
         client = WorkspaceClient() # Uses SP env vars
+        
+        # --- THIS PAYLOAD IS FOR CHAT MODELS ---
+        # If your endpoint is NOT a chat model, you may need to change this
+        # to: request={"prompt": full_prompt}
         response = client.serving_endpoints.query(
             os.getenv("SERVING_ENDPOINT_NAME"),
             messages=[ChatMessage(content=full_prompt, role=ChatMessageRole.USER)],
@@ -307,6 +313,69 @@ def call_llm_for_insights(df, prompt=None):
         logger.error(f"Error generating insights: {e}")
         return f"Error generating insights: {str(e)}"
     
+
+# --- NEW FUNCTION: To get follow-up suggestions ---
+def get_followup_questions(user_query: str, bot_response: str) -> dict:
+    """
+    Calls a serving endpoint to get follow-up question suggestions.
+    """
+    # --- !!! ACTION REQUIRED !!! ---
+    # Add a new variable to your .env file:
+    # SUGGESTION_ENDPOINT_NAME=your-suggestion-model-endpoint-name
+    SUGGESTION_ENDPOINT_NAME = os.environ.get("SUGGESTION_ENDPOINT_NAME")
+    if not SUGGESTION_ENDPOINT_NAME:
+        logger.warning("SUGGESTION_ENDPOINT_NAME not set. Skipping follow-up questions.")
+        return {}
+
+    # The prompt asks for JSON output for easy parsing.
+    prompt = f"""
+    Given a user's question and a chatbot's answer, generate one "better" version of the user's question and two relevant follow-up questions.
+    Return ONLY a single valid JSON object with the keys "better_prompt", "followup1", and "followup2".
+
+    User Question: "{user_query}"
+    Chatbot Answer: "{bot_response[:1000]}"
+
+    JSON:
+    """
+
+    try:
+        client = WorkspaceClient() # Uses SP env vars
+        
+        # --- !!! ACTION REQUIRED !!! ---
+        # This payload assumes a model that accepts a 'prompt'.
+        # If your model expects 'messages', change this to:
+        # request={"messages": [{"role": "user", "content": prompt}]}
+        payload = {
+            "prompt": prompt,
+            "max_tokens": 200,
+            "temperature": 0.5
+        }
+
+        response = client.serving_endpoints.query(
+            SUGGESTION_ENDPOINT_NAME,
+            request=payload
+        )
+
+        # Parse the response. This is highly dependent on your model.
+        # This assumes the model returns: {"predictions": ["{\"better_prompt\": ...}"]}
+        if "predictions" in response and response.predictions:
+            # Clean up potential markdown/fencing
+            json_str = response.predictions[0].strip().replace("```json", "").replace("```", "")
+            data = json.loads(json_str)
+            return {
+                "better_prompt": data.get("better_prompt"),
+                "followup1": data.get("followup1"),
+                "followup2": data.get("followup2"),
+            }
+        else:
+            logger.warning(f"Unexpected response from suggestion endpoint: {response}")
+            return {}
+
+    except Exception as e:
+        logger.error(f"Error getting follow-up questions: {e}")
+        return {}
+# --- END NEW FUNCTION ---
+
 
 # Callback 1: Handle inputs and show thinking indicator
 @app.callback(
@@ -323,7 +392,9 @@ def call_llm_for_insights(df, prompt=None):
      Input("suggestion-3", "n_clicks"),
      Input("suggestion-4", "n_clicks"),
      Input("send-button-fixed", "n_clicks"),
-     Input("chat-input-fixed", "n_submit")],
+     Input("chat-input-fixed", "n_submit"),
+     # --- MODIFICATION: Add new Input for follow-up suggestions ---
+     Input({"type": "followup-suggestion", "index": ALL}, "n_clicks")],
     [State("suggestion-1-text", "children"),
      State("suggestion-2-text", "children"),
      State("suggestion-3-text", "children"),
@@ -333,24 +404,46 @@ def call_llm_for_insights(df, prompt=None):
      State("welcome-container", "className"),
      State("chat-list", "children"),
      State("chat-history-store", "data"),
-     State("session-store", "data")],
+     State("session-store", "data"),
+     # --- MODIFICATION: Add new State for follow-up suggestions ---
+     State({"type": "followup-suggestion", "index": ALL}, "id")
+    ],
     prevent_initial_call=True
 )
 def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, submit_clicks,
+                      followup_clicks, # <--- New argument
                       s1_text, s2_text, s3_text, s4_text, input_value, current_messages,
-                      welcome_class, current_chat_list, chat_history, session_data):
+                      welcome_class, current_chat_list, chat_history, session_data,
+                      followup_ids): # <--- New argument
     ctx = callback_context
     if not ctx.triggered:
         return [no_update] * 8
 
-    trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+    trigger_id_str = ctx.triggered[0]["prop_id"].split(".")[0]
     
     suggestion_map = {
         "suggestion-1": s1_text, "suggestion-2": s2_text,
         "suggestion-3": s3_text, "suggestion-4": s4_text
     }
-    user_input = suggestion_map.get(trigger_id, input_value)
     
+    user_input = None
+
+    # --- MODIFICATION: Check for follow-up suggestion clicks first ---
+    if "followup-suggestion" in trigger_id_str:
+        try:
+            # User clicked one of the new follow-up buttons
+            trigger_id_dict = json.loads(trigger_id_str)
+            user_input = trigger_id_dict.get("text")
+        except:
+            pass # Ignore if parse fails
+    elif trigger_id_str in suggestion_map:
+        # User clicked a welcome suggestion
+        user_input = suggestion_map[trigger_id_str]
+    else:
+        # User typed or clicked send
+        user_input = input_value
+    # --- END MODIFICATION ---
+
     if not user_input:
         return [no_update] * 8
     
@@ -437,18 +530,15 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
     if not user_input:
         return no_update, no_update, no_update, no_update, no_update
     
-    # --- MODIFICATION: Get the user token from the header ---
     user_token = get_user_token_from_header()
     
     try:
-        # --- MODIFICATION: Pass user_token to genie_query ---
         conv_id, msg_id, response, query_text = genie_query(
             user_input, 
             conversation_id, 
-            user_token=user_token # Pass the token
+            user_token=user_token
         )
         
-        # Handle expired or failed conversation
         if conv_id is None:
             error_msg = str(response)
             error_response = html.Div([
@@ -456,18 +546,18 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 html.Div([html.Div(error_msg, className="message-text")], className="message-content")
             ], className="bot-message message")
             
-            # Clear the bad conversation_id from session
             new_session_data = {"current_session": None, "conversation_id": None}
             updated_messages = (current_messages or [])[:-1] + [error_response]
             return updated_messages, chat_history, {"trigger": False, "message": ""}, False, new_session_data
 
-        # If successful, update session data with the correct conv_id
         new_session_data = {**session_data, "conversation_id": conv_id}
+        
+        response_text_for_context = "" # For follow-up prompt
         
         if isinstance(response, str):
             content = dcc.Markdown(response, className="message-text")
+            response_text_for_context = response
         else:
-            # Data table response
             df = pd.DataFrame(response)
             df_id = f"table-{len(chat_history)}-{len(current_messages)}"
             
@@ -486,7 +576,6 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 style_data={'whiteSpace': 'normal', 'height': 'auto'},
                 fill_width=False
             )
-
             query_section = None
             if query_text is not None:
                 formatted_sql = format_sql_query(query_text)
@@ -514,13 +603,67 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 type="circle",
                 children=html.Div(id={"type": "insight-output", "index": df_id})
             )
-
             content = html.Div([
                 html.Div(data_table, style={'marginBottom': '20px', 'paddingRight': '5px'}),
                 query_section if query_section else None,
                 insight_button, insight_output,
             ])
+            response_text_for_context = f"A table was returned for the query: {query_text}"
+
+        # --- MODIFICATION: Get follow-up questions ---
         
+        # Define inline styles for the new suggestion buttons
+        pill_style = {
+            "backgroundColor": "#f0f0f0", "border": "1px solid #ddd",
+            "borderRadius": "16px", "padding": "6px 12px", "margin": "4px",
+            "fontSize": "13px", "cursor": "pointer", "display": "block",
+            "textAlign": "left", "width": "fit-content", "maxWidth": "100%",
+            "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap",
+            "lineHeight": "1.4"
+        }
+        prefix_style = {"fontWeight": "600", "marginRight": "5px"}
+        container_style = {"paddingTop": "10px", "marginTop": "10px", "borderTop": "1px solid #eee"}
+        
+        suggestion_div = html.Div(style=container_style)
+        try:
+            suggestions = get_followup_questions(user_input, response_text_for_context)
+            suggestion_elements = []
+            
+            if suggestions.get("better_prompt"):
+                suggestion_elements.append(
+                    html.Button([
+                        html.Span("💡 Better way to ask: ", style=prefix_style),
+                        html.Span(suggestions["better_prompt"])
+                    ], id={"type": "followup-suggestion", "index": 0, "text": suggestions["better_prompt"]},
+                       style=pill_style)
+                )
+            if suggestions.get("followup1"):
+                suggestion_elements.append(
+                    html.Button([
+                        html.Span("Relevant question: ", style=prefix_style),
+                        html.Span(suggestions["followup1"])
+                    ], id={"type": "followup-suggestion", "index": 1, "text": suggestions["followup1"]},
+                       style=pill_style)
+                )
+            if suggestions.get("followup2"):
+                suggestion_elements.append(
+                    html.Button([
+                        html.Span("Relevant question: ", style=prefix_style),
+                        html.Span(suggestions["followup2"])
+                    ], id={"type": "followup-suggestion", "index": 2, "text": suggestions["followup2"]},
+                       style=pill_style)
+                )
+            
+            if suggestion_elements:
+                suggestion_div = html.Div(suggestion_elements, style=container_style)
+            else:
+                suggestion_div = html.Div() # Empty div, no border
+
+        except Exception as e:
+            logger.error(f"Failed to generate follow-up suggestions: {e}")
+            suggestion_div = html.Div() # Empty div on failure
+        # --- END MODIFICATION ---
+
         # Create bot response
         bot_response = html.Div([
             html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
@@ -528,11 +671,15 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 content,
                 html.Div([
                     html.Div([
-                        # Add new dictionary IDs for feedback, including conv_id and msg_id
                         html.Button(id={"type": "thumbs-up", "index": msg_id, "conv_id": conv_id}, className="thumbs-up-button"),
                         html.Button(id={"type": "thumbs-down", "index": msg_id, "conv_id": conv_id}, className="thumbs-down-button")
                     ], className="message-actions")
-                ], className="message-footer")
+                ], className="message-footer"),
+                
+                # --- MODIFICATION: Add the new suggestion div ---
+                suggestion_div
+                # --- END MODIFICATION ---
+
             ], className="message-content")
         ], className="bot-message message")
         
@@ -540,7 +687,7 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
         
         if chat_history and len(chat_history) > 0:
             chat_history[0]["messages"] = updated_messages
-            chat_history[0]["backend_conversation_id"] = conv_id # Store backend ID for session switching
+            chat_history[0]["backend_conversation_id"] = conv_id
 
         return updated_messages, chat_history, {"trigger": False, "message": ""}, False, new_session_data
         
@@ -603,12 +750,10 @@ def show_chat_history(n_clicks, chat_history, current_chat_list, session_data):
     if not chat_history or clicked_index >= len(chat_history):
         return no_update, no_update, no_update, no_update
     
-    # Update session-store with the clicked session's data
     clicked_session_data = chat_history[clicked_index]
     new_conv_id = clicked_session_data.get("backend_conversation_id")
     new_session_data = {"current_session": clicked_index, "conversation_id": new_conv_id}
     
-    # Update active state in chat list
     updated_chat_list = []
     for i, item in enumerate(current_chat_list):
         new_class = "chat-item active" if i == clicked_index else "chat-item"
@@ -650,10 +795,8 @@ app.clientside_callback(
     prevent_initial_call=True
 )
 def reset_to_welcome(n1, n2, chat_history_store, chat_list):
-    # Reset session when starting a new chat
     new_session_data = {"current_session": None, "conversation_id": None}
     
-    # Deselect all chat items
     updated_chat_list = []
     if chat_list:
         for i, item in enumerate(chat_list):
@@ -666,7 +809,17 @@ def reset_to_welcome(n1, n2, chat_history_store, chat_list):
     return ("welcome-container visible", [], {"trigger": False, "message": ""}, 
             False, new_session_data, updated_chat_list)
 
-# (Callback 7 removed, redundant)
+# (Callback 7 removed, was redundant)
+@app.callback(
+    [Output("welcome-container", "className", allow_duplicate=True)],
+    [Input("chat-messages", "children")],
+    prevent_initial_call=True
+)
+def hide_welcome_on_chat(chat_messages):
+    if chat_messages:
+        return ["welcome-container hidden"]
+    else:
+        return ["welcome-container visible"]
 
 # Callback 8: Disable input while query is running
 @app.callback(
@@ -701,7 +854,6 @@ def handle_feedback(up_clicks, down_clicks):
     msg_id = trigger_id["index"]
     conv_id = trigger_id["conv_id"]
     
-    # --- MODIFICATION: Get user token to pass to feedback ---
     user_token = get_user_token_from_header()
     
     if button_type == "thumbs-up":
@@ -806,9 +958,14 @@ def generate_insights(n_clicks, btn_id, chat_history):
     table_id = btn_id["index"]
     df = None
     if chat_history and len(chat_history) > 0:
-        df_json = chat_history[0].get('dataframes', {}).get(table_id)
+        # Find the correct session in chat_history
+        current_session_index = 0 # This assumes insights are only for the latest chat[0]
+        # A more robust solution would be to get current_session from a store
+        
+        df_json = chat_history[current_session_index].get('dataframes', {}).get(table_id)
         if df_json:
             df = pd.read_json(df_json, orient='split')
+            
     if df is None:
         logger.error(f"Could not find DataFrame for id {table_id}")
         return dcc.Markdown("Error: Could not retrieve data for insights.", className="insight-content")
@@ -818,3 +975,4 @@ def generate_insights(n_clicks, btn_id, chat_history):
 
 if __name__ == "__main__":
     app.run_server(debug=True, host='0.0.0.0', port=8050)
+
