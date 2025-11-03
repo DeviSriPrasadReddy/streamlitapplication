@@ -64,7 +64,7 @@ app.layout = html.Div([
                     html.Img(src="assets/menu_icon.svg", className="menu-icon")
                 ], id="sidebar-toggle", className="nav-button"),
                 html.Button([
-                    html.Img(src="assetsB/plus_icon.svg", className="new-chat-icon")
+                    html.Img(src="assets/plus_icon.svg", className="new-chat-icon")
                 ], id="new-chat-button", className="nav-button",disabled=False),
                 html.Button([
                     html.Img(src="assets/plus_icon.svg", className="new-chat-icon"),
@@ -91,7 +91,7 @@ app.layout = html.Div([
                     id="logout-button",
                     className="logout-button"
                 ),
-                href=f"https{os.getenv('DATABRICKS_HOST')}/login.html",
+                href=f"https://{os.getenv('DATABRICKS_HOST')}/login.html",
                 className="logout-link"
             )
         ], className="nav-right")
@@ -188,11 +188,9 @@ app.layout = html.Div([
     
     html.Div(id='dummy-output'),
     dcc.Store(id="chat-trigger", data={"trigger": False, "message": "", "conversation_id": None}),
-    # --- MODIFICATION: Added storage_type='session' ---
     dcc.Store(id="chat-history-store", data=[], storage_type='session'),
     dcc.Store(id="query-running-store", data=False),
     dcc.Store(id="session-store", data={"current_session": None, "conversation_id": None}, storage_type='session')
-    # --- END MODIFICATION ---
 ])
 
 def format_sql_query(sql_query):
@@ -200,8 +198,8 @@ def format_sql_query(sql_query):
         sql_query, keyword_case='upper', reindent=True, indent_width=2
     )
 
-def call_llm_for_insights(df, prompt=None):
-    # ... (This function is unchanged) ...
+# --- MODIFICATION: Function now accepts user_token ---
+def call_llm_for_insights(df, prompt=None, user_token: str = None):
     if prompt is None:
         prompt = (
             "You are a professional data analyst. Given the following table data, "
@@ -212,11 +210,16 @@ def call_llm_for_insights(df, prompt=None):
     csv_data = df.to_csv(index=False)
     full_prompt = f"{prompt}Table data:\n{csv_data}"
     try:
-        client = WorkspaceClient()
+        # --- MODIFICATION: Initialize client based on token ---
+        if user_token:
+            client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
+            logger.info("call_llm_for_insights: Using user token.")
+        else:
+            client = WorkspaceClient() # Fallback to SP
+            logger.warning("call_llm_for_insights: No user token, falling back to Service Principal.")
+        # --- END MODIFICATION ---
         
         # --- !!! CHECK YOUR PAYLOAD ---
-        # This is for CHAT models. If your model is a BASE model,
-        # you may need: request={"prompt": full_prompt}
         response = client.serving_endpoints.query(
             os.getenv("SERVING_ENDPOINT_NAME"),
             messages=[ChatMessage(content=full_prompt, role=ChatMessageRole.USER)],
@@ -226,8 +229,8 @@ def call_llm_for_insights(df, prompt=None):
         logger.error(f"Error generating insights: {e}")
         return f"Error generating insights: {str(e)}"
 
-def get_followup_questions(user_query: str, bot_response: str) -> dict:
-    # ... (This function is unchanged) ...
+# --- MODIFICATION: Function now accepts user_token ---
+def get_followup_questions(user_query: str, bot_response: str, user_token: str = None) -> dict:
     SUGGESTION_ENDPOINT_NAME = os.environ.get("SUGGESTION_ENDPOINT_NAME")
     if not SUGGESTION_ENDPOINT_NAME:
         logger.warning("SUGGESTION_ENDPOINT_NAME not set. Skipping follow-up questions.")
@@ -240,11 +243,16 @@ def get_followup_questions(user_query: str, bot_response: str) -> dict:
     JSON:
     """
     try:
-        client = WorkspaceClient()
+        # --- MODIFICATION: Initialize client based on token ---
+        if user_token:
+            client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
+            logger.info("get_followup_questions: Using user token.")
+        else:
+            client = WorkspaceClient() # Fallback to SP
+            logger.warning("get_followup_questions: No user token, falling back to Service Principal.")
+        # --- END MODIFICATION ---
         
         # --- !!! CHECK YOUR PAYLOAD ---
-        # This is for BASE models. If your model is a CHAT model,
-        # you may need: request={"messages": [{"role": "user", "content": prompt}]}
         payload = {
             "prompt": prompt, "max_tokens": 200, "temperature": 0.5
         }
@@ -264,62 +272,39 @@ def get_followup_questions(user_query: str, bot_response: str) -> dict:
         return {}
 
 
-# --- NEW HELPER FUNCTION: Smart Chart Generator ---
 def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
-    """
-    Analyzes a DataFrame and returns an interactive dcc.Graph component
-    with the most appropriate chart type.
-    """
+    # ... (This function is unchanged, it runs locally) ...
     try:
-        # Create a copy to avoid modifying the original df
         plot_df = df.copy()
-        
-        # Try to identify column types
         numerics = plot_df.select_dtypes(include=['number']).columns.tolist()
         objects = plot_df.select_dtypes(include=['object', 'category']).columns.tolist()
-        
-        # Try to convert object columns to datetime if they look like dates
         date_cols = []
         for col in objects:
             try:
-                # Try to convert, but don't overwrite if it fails
                 converted_col = pd.to_datetime(plot_df[col], errors='coerce')
-                # Check if conversion was successful (at least 50% valid dates)
                 if converted_col.notna().sum() / len(plot_df) > 0.5:
                     plot_df[col] = converted_col
                     date_cols.append(col)
             except Exception:
-                pass # Not a date column
-        
-        # Remove newly found date_cols from objects list
+                pass
         objects = [col for col in objects if col not in date_cols]
-
         fig = None
         
-        # Rule 1: Time Series (Date + Number)
         if date_cols and numerics:
             date_col, num_col = date_cols[0], numerics[0]
             plot_df = plot_df.sort_values(by=date_col)
             fig = px.line(plot_df, x=date_col, y=num_col, title=f"{num_col} over {date_col}", markers=True)
             logger.info(f"Smart Chart: Detected Time Series, creating Line Chart ({num_col} vs {date_col})")
-
-        # Rule 2: Categorical + Numeric (Bar or Pie)
         elif objects and numerics:
             cat_col, num_col = objects[0], numerics[0]
             unique_count = plot_df[cat_col].nunique()
-            
             if unique_count <= 8:
-                # Pie chart for few categories
                 fig = px.pie(plot_df, names=cat_col, values=num_col, title=f"Distribution of {num_col} by {cat_col}")
                 logger.info(f"Smart Chart: Detected few categories, creating Pie Chart ({num_col} vs {cat_col})")
             elif unique_count <= 50:
-                # Bar chart for moderate categories
                 plot_df = plot_df.sort_values(by=num_col, ascending=False)
                 fig = px.bar(plot_df, x=cat_col, y=num_col, title=f"{num_col} by {cat_col}")
                 logger.info(f"Smart Chart: Detected categories, creating Bar Chart ({num_col} vs {cat_col})")
-            # If > 50 categories, fig remains None (too busy)
-
-        # Rule 3: Scatter Plot (2 Numerics)
         elif len(numerics) >= 2:
             num_col_1, num_col_2 = numerics[0], numerics[1]
             fig = px.scatter(df, x=num_col_1, y=num_col_2, title=f"{num_col_2} vs. {num_col_1}",
@@ -327,27 +312,24 @@ def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
             logger.info(f"Smart Chart: Detected 2+ numerics, creating Scatter Plot ({num_col_2} vs {num_col_1})")
         
         if fig:
-            # Apply standard styling
             fig.update_layout(
-                template="plotly_white", 
-                title_x=0.5,
+                template="plotly_white", title_x=0.5,
                 margin=dict(l=20, r=20, t=50, b=20),
-                paper_bgcolor="rgba(0,0,0,0)", # Transparent background
-                plot_bgcolor="rgba(0,0,0,0)"  # Transparent background
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)"
             )
             return dcc.Graph(id=chart_id, figure=fig)
         
         logger.info("Smart Chart: No suitable chart type found for the data.")
-        return None # No suitable chart found
-
+        return None
     except Exception as e:
         logger.error(f"Error creating smart chart: {e}")
-        return None # Don't crash the app if charting fails
-# --- END NEW HELPER FUNCTION ---
+        return None
 
 
 # Callback 1: Handle inputs and show thinking indicator
 @app.callback(
+    # ... (Outputs are unchanged) ...
     [Output("chat-messages", "children", allow_duplicate=True),
      Output("chat-input-fixed", "value", allow_duplicate=True),
      Output("welcome-container", "className", allow_duplicate=True),
@@ -356,6 +338,7 @@ def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
      Output("chat-list", "children", allow_duplicate=True),
      Output("chat-history-store", "data", allow_duplicate=True),
      Output("session-store", "data", allow_duplicate=True)],
+    # ... (Inputs and States are unchanged) ...
     [Input("suggestion-1", "n_clicks"),
      Input("suggestion-2", "n_clicks"),
      Input("suggestion-3", "n_clicks"),
@@ -382,20 +365,16 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
                       s1_text, s2_text, s3_text, s4_text, input_value, current_messages,
                       welcome_class, current_chat_list, chat_history, session_data,
                       followup_ids):
-    # ... (This function is unchanged from your last version) ...
+    # ... (This function is unchanged) ...
     ctx = callback_context
     if not ctx.triggered:
         return [no_update] * 8
-
     trigger_id_str = ctx.triggered[0]["prop_id"].split(".")[0]
-    
     suggestion_map = {
         "suggestion-1": s1_text, "suggestion-2": s2_text,
         "suggestion-3": s3_text, "suggestion-4": s4_text
     }
-    
     user_input = None
-
     if "followup-suggestion" in trigger_id_str:
         try:
             trigger_id_dict = json.loads(trigger_id_str)
@@ -405,29 +384,22 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
         user_input = suggestion_map[trigger_id_str]
     else:
         user_input = input_value
-
     if not user_input:
         return [no_update] * 8
-    
     user_message = html.Div([
         html.Div([html.Div("Y", className="user-avatar"), html.Span("You", className="model-name")], className="user-info"),
         html.Div(user_input, className="message-text")
     ], className="user-message message")
     updated_messages = (current_messages or []) + [user_message]
-    
     thinking_indicator = html.Div([
         html.Div([html.Span(className="spinner"), html.Span("Thinking...")], className="thinking-indicator")
     ], className="bot-message message")
     updated_messages.append(thinking_indicator)
-    
     current_session_index = session_data.get("current_session")
     current_conv_id = session_data.get("conversation_id")
-
     if current_session_index is None:
         current_session_index = 0
-    
     chat_history = chat_history or []
-    
     if current_session_index < len(chat_history):
         chat_history[current_session_index]["messages"] = updated_messages
         chat_history[current_session_index]["queries"].append(user_input)
@@ -438,7 +410,6 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
             "queries": [user_input],
             "messages": updated_messages
         })
-    
     updated_chat_list = []
     for i, session in enumerate(chat_history):
         first_query = session["queries"][0]
@@ -450,7 +421,6 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
                 id={"type": "chat-item", "index": i}
             )
         )
-    
     trigger_data = {
         "trigger": True, 
         "message": user_input,
@@ -460,7 +430,6 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
         "current_session": current_session_index, 
         "conversation_id": current_conv_id
     }
-
     return (updated_messages, "", "welcome-container hidden",
             trigger_data, True,
             updated_chat_list, chat_history, updated_session_data)
@@ -496,7 +465,6 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
         )
         
         if conv_id is None:
-            # Handle expired or failed conversation
             error_msg = str(response)
             error_response = html.Div([
                 html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
@@ -514,28 +482,25 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
             content = dcc.Markdown(response, className="message-text")
             response_text_for_context = response
         else:
-            # --- MODIFICATION: Call Smart Chart function ---
             df = pd.DataFrame(response)
             df_id = f"table-{len(chat_history)}-{len(current_messages)}"
-            
-            # Generate a unique ID for the chart components
             chart_index = f"chart-{len(chat_history)}-{len(current_messages)}"
             
-            # Call the new helper function
             chart_component = create_smart_chart(df, chart_id={"type": "chart-graph", "index": chart_index})
             
             if chart_component:
+                # --- MODIFICATION: Make chart visible by default ---
                 chart_section = html.Div([
                     html.Button([
-                        html.Span("Show Chart", id={"type": "toggle-chart-text", "index": chart_index})
+                        html.Span("Hide Chart", id={"type": "toggle-chart-text", "index": chart_index})
                     ], id={"type": "toggle-chart", "index": chart_index}, className="toggle-query-button", n_clicks=0),
                     html.Div(
                         chart_component,
                         id={"type": "chart-container", "index": chart_index},
-                        className="query-code-container hidden" # Start hidden
+                        className="query-code-container visible" # <-- CHANGED from 'hidden'
                     )
                 ], className="query-section")
-            # --- END MODIFICATION ---
+                # --- END MODIFICATION ---
 
             if chat_history and len(chat_history) > 0:
                 chat_history[0].setdefault('dataframes', {})[df_id] = df.to_json(orient='split')
@@ -581,24 +546,23 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 children=html.Div(id={"type": "insight-output", "index": df_id})
             )
             
-            # --- MODIFICATION: Add chart_section to the content ---
             content = html.Div([
-                chart_section if chart_section else None, # <-- ADDED
+                chart_section if chart_section else None,
                 html.Div([data_table], style={'marginBottom': '20px', 'paddingRight': '5px'}),
                 query_section if query_section else None,
                 insight_button, insight_output,
             ])
-            # --- END MODIFICATION ---
-            
             response_text_for_context = f"A table was returned for the query: {query_text or '...'} "
         
-        # ... (Follow-up suggestions logic is unchanged) ...
         pill_style = {"backgroundColor": "#f0f0f0", "border": "1px solid #ddd", "borderRadius": "16px", "padding": "6px 12px", "margin": "4px", "fontSize": "13px", "cursor": "pointer", "display": "block", "textAlign": "left", "width": "fit-content", "maxWidth": "100%", "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap", "lineHeight": "1.4"}
         prefix_style = {"fontWeight": "600", "marginRight": "5px"}
         container_style = {"paddingTop": "10px", "marginTop": "10px", "borderTop": "1px solid #eee"}
         suggestion_div = html.Div(style=container_style)
         try:
-            suggestions = get_followup_questions(user_input, response_text_for_context)
+            # --- MODIFICATION: Pass user_token ---
+            suggestions = get_followup_questions(user_input, response_text_for_context, user_token=user_token)
+            # --- END MODIFICATION ---
+            
             suggestion_elements = []
             if suggestions.get("better_prompt"):
                 suggestion_elements.append(
@@ -629,7 +593,6 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
             logger.error(f"Failed to generate follow-up suggestions: {e}")
             suggestion_div = html.Div()
 
-        # Create bot response
         bot_response = html.Div([
             html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
             html.Div([
@@ -653,7 +616,6 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
         return updated_messages, chat_history, {"trigger": False, "message": ""}, False, new_session_data
         
     except Exception as e:
-        # ... (Error handling is unchanged) ...
         logger.error(f"Error in get_model_response: {e}")
         error_msg = f"Sorry, I encountered an error: {str(e)}. Please try again later."
         error_response = html.Div([
@@ -840,7 +802,7 @@ def toggle_query_visibility(n_clicks, current_class):
     return "query-code-container hidden", "Show code"
 
 
-# --- NEW CALLBACK: Toggle Chart Visibility ---
+# --- MODIFIED CALLBACK: Toggle Chart Visibility ---
 @app.callback(
     [Output({"type": "chart-container", "index": MATCH}, "className"),
      Output({"type": "toggle-chart-text", "index": MATCH}, "children")],
@@ -849,11 +811,14 @@ def toggle_query_visibility(n_clicks, current_class):
     prevent_initial_call=True
 )
 def toggle_chart_visibility(n_clicks, current_class):
-    if n_clicks and "hidden" in current_class:
-        # Use the same visible class as the SQL code for consistency
-        return "query-code-container visible", "Hide Chart" 
-    return "query-code-container hidden", "Show Chart"
-# --- END NEW CALLBACK ---
+    # This logic is now correct for the new default "visible" state
+    if n_clicks and "visible" in current_class:
+        # It was visible, so n_clicks=1, 3, 5... will hide it
+        return "query-code-container hidden", "Show Chart"
+    else:
+        # It was hidden (or n_clicks=0), so n_clicks=2, 4, 6... will show it
+        return "query-code-container visible", "Hide Chart"
+# --- END MODIFIED CALLBACK ---
 
 
 # ... (Callbacks for welcome text modal are unchanged) ...
@@ -925,7 +890,7 @@ def handle_modal_actions(save_clicks, close_clicks,
     Input({"type": "insight-button", "index": MATCH}, "n_clicks"),
     State({"type": "insight-button", "index": MATCH}, "id"),
     State("chat-history-store", "data"),
-    State("session-store", "data"), # <-- Added session store
+    State("session-store", "data"),
     prevent_initial_call=True
 )
 def generate_insights(n_clicks, btn_id, chat_history, session_data):
@@ -935,7 +900,6 @@ def generate_insights(n_clicks, btn_id, chat_history, session_data):
     table_id = btn_id["index"]
     df = None
     
-    # Find the correct session in chat_history
     current_session_index = session_data.get("current_session", 0)
     if not chat_history or current_session_index >= len(chat_history):
         logger.error(f"Could not find session {current_session_index} in chat history.")
@@ -949,7 +913,11 @@ def generate_insights(n_clicks, btn_id, chat_history, session_data):
         logger.error(f"Could not find DataFrame for id {table_id} in session {current_session_index}")
         return dcc.Markdown("Error: Could not retrieve data for insights.", className="insight-content")
     
-    insights = call_llm_for_insights(df)
+    # --- MODIFICATION: Pass user_token ---
+    user_token = get_user_token_from_header()
+    insights = call_llm_for_insights(df, user_token=user_token)
+    # --- END MODIFICATION ---
+    
     return dcc.Markdown(insights, className="insight-content")
 
 
