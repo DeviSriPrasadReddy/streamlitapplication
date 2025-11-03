@@ -398,24 +398,70 @@ def convert_df_types(df: pd.DataFrame) -> pd.DataFrame:
 # --- END NEW FUNCTION ---
 
 
-# --- NEW FUNCTION: To generate visualizations ---
+# --- NEW FUNCTION: To generate visualizations (MODIFIED) ---
 MAX_CATEGORICAL_UNIQUE = 50 # Cap for bar charts
 
 def generate_visualizations(df: pd.DataFrame) -> list:
     """
-    Analyzes a DataFrame and generates a list of Plotly graphs
-    for univariate analysis.
+    Analyzes a DataFrame and generates a list of Plotly graphs.
+    
+    --- MODIFICATION ---
+    Adds a special case for 2-column DataFrames (1 categorical, 1 numeric)
+    to plot a bivariate bar chart.
     """
     visuals = []
     
     # Base layout for small, clean charts
     chart_layout = {
         "margin": dict(t=30, b=20, l=30, r=20),
-        "height": 300,
+        "height": 350, # Increased height slightly
         "template": "plotly_white",
         "title_font_size": 14,
     }
 
+    # --- NEW: Special check for 2-column aggregated DataFrame ---
+    if len(df.columns) == 2:
+        numeric_cols = df.select_dtypes(include=np.number).columns
+        object_cols = df.select_dtypes(include=['object', 'category']).columns
+        
+        # Check for the common 1-numeric, 1-categorical case
+        if len(numeric_cols) == 1 and len(object_cols) == 1:
+            numeric_col = numeric_cols[0]
+            object_col = object_cols[0]
+            
+            logger.info(f"Detected 2-column (cat/num) DataFrame. Generating bivariate bar chart for {object_col} vs {numeric_col}.")
+            
+            # Handle 1000+ rows by showing Top 50
+            if len(df) > MAX_CATEGORICAL_UNIQUE:
+                plot_df = df.nlargest(MAX_CATEGORICAL_UNIQUE, numeric_col).sort_values(by=numeric_col, ascending=False)
+                title = f"Top {MAX_CATEGORICAL_UNIQUE} '{object_col}' by '{numeric_col}'"
+            else:
+                plot_df = df.sort_values(by=numeric_col, ascending=False)
+                title = f"'{numeric_col}' by '{object_col}'"
+                
+            try:
+                # 1. The Bivariate Bar Chart you want
+                fig_bar = px.bar(plot_df, x=object_col, y=numeric_col, title=title)
+                fig_bar.update_layout(chart_layout)
+                visuals.append(html.Div([
+                    dcc.Graph(figure=fig_bar)
+                ], className="visual-item"))
+                
+                # 2. The original Histogram (still useful)
+                fig_hist = px.histogram(df, x=numeric_col, title=f"Distribution of '{numeric_col}'")
+                fig_hist.update_layout(chart_layout)
+                visuals.append(html.Div([
+                    dcc.Graph(figure=fig_hist)
+                ], className="visual-item"))
+                
+                return [html.Div(visuals, className="visual-container")] # Return early
+            except Exception as e:
+                logger.warning(f"Could not generate special 2-column chart: {e}")
+                # Fall through to default univariate logic if this fails
+    # --- END NEW CHECK ---
+
+    # --- Default Univariate Logic (original code) ---
+    logger.info("Using default univariate analysis for charts.")
     for col in df.columns:
         try:
             col_type = df[col].dtype
