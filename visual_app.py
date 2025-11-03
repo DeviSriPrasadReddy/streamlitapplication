@@ -2,7 +2,7 @@ import dash
 from dash import html, dcc, Input, Output, State, callback, ALL, MATCH, callback_context, no_update, clientside_callback, dash_table
 import dash_bootstrap_components as dbc
 import json
-import logging # <-- ADDED
+import logging 
 
 # --- MODIFICATION: Import dash.flask to access request headers ---
 import flask
@@ -79,7 +79,7 @@ app.layout = html.Div([
                     html.Img(src="assets/plus_icon.svg", className="new-chat-icon")
                 ], id="new-chat-button", className="nav-button",disabled=False),
                 html.Button([
-                    html.Img(src="assets.svg", className="new-chat-icon"),
+                    html.Img(src="assets/plus_icon.svg", className="new-chat-icon"),
                     html.Div("New chat", className="new-chat-text")
                 ], id="sidebar-new-chat-button", className="new-chat-button",disabled=False)
             ], id="nav-left", className="nav-left"),
@@ -376,6 +376,25 @@ def get_followup_questions(user_query: str, bot_response: str) -> dict:
     except Exception as e:
         logger.error(f"Error getting follow-up questions: {e}")
         return {}
+# --- END NEW FUNCTION ---
+
+
+# --- NEW FUNCTION: To convert DataFrame types ---
+def convert_df_types(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tries to convert object columns to numeric or datetime.
+    """
+    for col in df.columns:
+        if df[col].dtype == 'object':
+            # Try to convert to numeric, ignoring errors.
+            # If it fails, the column remains 'object'.
+            df[col] = pd.to_numeric(df[col], errors='ignore')
+            
+            # If it's still 'object', try to convert to datetime.
+            if df[col].dtype == 'object':
+                df[col] = pd.to_datetime(df[col], errors='ignore')
+                
+    return df
 # --- END NEW FUNCTION ---
 
 
@@ -1114,7 +1133,7 @@ def toggle_dtype_visibility(n_clicks):
         return "query-code-container visible", "Hide data types"
     return "query-code-container hidden", "Show data types"
 
-# --- NEW CALLBACK ---
+# --- NEW CALLBACK (MODIFIED) ---
 # Callback 15: Generate Visuals
 @app.callback(
     Output({"type": "visual-output", "index": MATCH}, "children"),
@@ -1141,6 +1160,9 @@ def generate_visuals(n_clicks, btn_id, chat_history, session_data):
         df_json = chat_history[current_session_index].get('dataframes', {}).get(table_id)
         if df_json:
             df = pd.read_json(df_json, orient='split')
+            
+            # --- !!! ADDED THIS LINE TO FIX DTYPES !!! ---
+            df = convert_df_types(df)
             
     if df is None:
         logger.error(f"Could not find DataFrame for id {table_id} in session {current_session_index}")
