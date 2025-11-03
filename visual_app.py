@@ -3,7 +3,7 @@ from dash import html, dcc, Input, Output, State, callback, ALL, MATCH, callback
 import dash_bootstrap_components as dbc
 import json
 import logging
-import dash.flask
+import flask
 from genieroom import genie_query, record_feedback
 import pandas as pd
 import os
@@ -26,7 +26,7 @@ def get_user_token_from_header():
     """Reads the user token from the request headers."""
     try:
         header_name = 'X-Databricks-User-Token' # Change if needed
-        token = dash.flask.request.headers.get(header_name)
+        token = flask.request.headers.get(header_name)
         if token:
             return token
     except Exception:
@@ -198,8 +198,8 @@ def format_sql_query(sql_query):
         sql_query, keyword_case='upper', reindent=True, indent_width=2
     )
 
-# --- MODIFICATION: Function now accepts user_token ---
 def call_llm_for_insights(df, prompt=None, user_token: str = None):
+    # ... (This function is unchanged from the file you provided) ...
     if prompt is None:
         prompt = (
             "You are a professional data analyst. Given the following table data, "
@@ -210,16 +210,13 @@ def call_llm_for_insights(df, prompt=None, user_token: str = None):
     csv_data = df.to_csv(index=False)
     full_prompt = f"{prompt}Table data:\n{csv_data}"
     try:
-        # --- MODIFICATION: Initialize client based on token ---
         if user_token:
             client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
             logger.info("call_llm_for_insights: Using user token.")
         else:
             client = WorkspaceClient() # Fallback to SP
             logger.warning("call_llm_for_insights: No user token, falling back to Service Principal.")
-        # --- END MODIFICATION ---
         
-        # --- !!! CHECK YOUR PAYLOAD ---
         response = client.serving_endpoints.query(
             os.getenv("SERVING_ENDPOINT_NAME"),
             messages=[ChatMessage(content=full_prompt, role=ChatMessageRole.USER)],
@@ -229,12 +226,12 @@ def call_llm_for_insights(df, prompt=None, user_token: str = None):
         logger.error(f"Error generating insights: {e}")
         return f"Error generating insights: {str(e)}"
 
-# --- MODIFICATION: Function now accepts user_token ---
+# --- MODIFICATION: Make function raise error ---
 def get_followup_questions(user_query: str, bot_response: str, user_token: str = None) -> dict:
     SUGGESTION_ENDPOINT_NAME = os.environ.get("SUGGESTION_ENDPOINT_NAME")
     if not SUGGESTION_ENDPOINT_NAME:
         logger.warning("SUGGESTION_ENDPOINT_NAME not set. Skipping follow-up questions.")
-        return {}
+        return {} # Return empty dict, not an error
     prompt = f"""
     Given a user's question and a chatbot's answer, generate one "better" version of the user's question and two relevant follow-up questions.
     Return ONLY a single valid JSON object with the keys "better_prompt", "followup1", and "followup2".
@@ -243,16 +240,13 @@ def get_followup_questions(user_query: str, bot_response: str, user_token: str =
     JSON:
     """
     try:
-        # --- MODIFICATION: Initialize client based on token ---
         if user_token:
             client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
             logger.info("get_followup_questions: Using user token.")
         else:
             client = WorkspaceClient() # Fallback to SP
             logger.warning("get_followup_questions: No user token, falling back to Service Principal.")
-        # --- END MODIFICATION ---
         
-        # --- !!! CHECK YOUR PAYLOAD ---
         payload = {
             "prompt": prompt, "max_tokens": 200, "temperature": 0.5
         }
@@ -268,43 +262,79 @@ def get_followup_questions(user_query: str, bot_response: str, user_token: str =
             logger.warning(f"Unexpected response from suggestion endpoint: {response}")
             return {}
     except Exception as e:
+        # Re-raise the exception so the calling function can display it
         logger.error(f"Error getting follow-up questions: {e}")
-        return {}
+        raise e
+# --- END MODIFICATION ---
 
 
+# --- MODIFICATION: Robust Smart Chart Function ---
 def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
-    # ... (This function is unchanged, it runs locally) ...
+    """
+    Analyzes a DataFrame and returns an interactive dcc.Graph component
+    or a visible error message.
+    """
     try:
         plot_df = df.copy()
+
+        # --- NEW ROBUST CONVERSION STEP ---
+        for col in plot_df.columns:
+            # Try to convert to numeric first, this is safer
+            try:
+                converted_num = pd.to_numeric(plot_df[col], errors='coerce')
+                # Check if conversion was successful (at least 50% numbers)
+                if converted_num.notna().sum() / len(plot_df) > 0.5:
+                    # Check if it's an integer-like float (e.g., 2024.0)
+                    if (converted_num % 1 == 0).all():
+                        # Don't treat integer IDs or Years as dates
+                        if converted_num.nunique() > 50 or converted_num.min() > 1900:
+                             plot_df[col] = converted_num
+                             continue # Skip date conversion for this column
+                    else:
+                        plot_df[col] = converted_num
+                        continue # Skip date conversion for this column
+            except Exception:
+                pass # Not a number
+
+            # Try to convert to datetime
+            try:
+                converted_date = pd.to_datetime(plot_df[col], errors='coerce')
+                if converted_date.notna().sum() / len(plot_df) > 0.5:
+                    plot_df[col] = converted_date
+            except Exception:
+                pass # Not a date
+        # --- END NEW CONVERSION STEP ---
+
+        # Now, the dtype selection should be more accurate
         numerics = plot_df.select_dtypes(include=['number']).columns.tolist()
         objects = plot_df.select_dtypes(include=['object', 'category']).columns.tolist()
-        date_cols = []
-        for col in objects:
-            try:
-                converted_col = pd.to_datetime(plot_df[col], errors='coerce')
-                if converted_col.notna().sum() / len(plot_df) > 0.5:
-                    plot_df[col] = converted_col
-                    date_cols.append(col)
-            except Exception:
-                pass
-        objects = [col for col in objects if col not in date_cols]
+        date_cols = plot_df.select_dtypes(include=['datetime', 'datetimetz']).columns.tolist()
+
         fig = None
         
+        # Rule 1: Time Series (Date + Number)
         if date_cols and numerics:
             date_col, num_col = date_cols[0], numerics[0]
             plot_df = plot_df.sort_values(by=date_col)
             fig = px.line(plot_df, x=date_col, y=num_col, title=f"{num_col} over {date_col}", markers=True)
             logger.info(f"Smart Chart: Detected Time Series, creating Line Chart ({num_col} vs {date_col})")
+
+        # Rule 2: Categorical + Numeric (Bar or Pie)
         elif objects and numerics:
             cat_col, num_col = objects[0], numerics[0]
             unique_count = plot_df[cat_col].nunique()
-            if unique_count <= 8:
+            
+            if unique_count > 0 and unique_count <= 8:
                 fig = px.pie(plot_df, names=cat_col, values=num_col, title=f"Distribution of {num_col} by {cat_col}")
                 logger.info(f"Smart Chart: Detected few categories, creating Pie Chart ({num_col} vs {cat_col})")
-            elif unique_count <= 50:
+            elif unique_count > 0 and unique_count <= 50:
                 plot_df = plot_df.sort_values(by=num_col, ascending=False)
                 fig = px.bar(plot_df, x=cat_col, y=num_col, title=f"{num_col} by {cat_col}")
                 logger.info(f"Smart Chart: Detected categories, creating Bar Chart ({num_col} vs {cat_col})")
+            else:
+                 logger.info(f"Smart Chart: Too many categories ({unique_count}) for a bar chart.")
+
+        # Rule 3: Scatter Plot (2 Numerics)
         elif len(numerics) >= 2:
             num_col_1, num_col_2 = numerics[0], numerics[1]
             fig = px.scatter(df, x=num_col_1, y=num_col_2, title=f"{num_col_2} vs. {num_col_1}",
@@ -321,15 +351,24 @@ def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
             return dcc.Graph(id=chart_id, figure=fig)
         
         logger.info("Smart Chart: No suitable chart type found for the data.")
-        return None
+        return None # Return None, not an error, if no chart is suitable
+    
     except Exception as e:
         logger.error(f"Error creating smart chart: {e}")
-        return None
+        # --- MODIFICATION: Return a visible error message ---
+        return html.Div([
+            html.Strong("Error creating chart:"),
+            html.Pre(str(e), style={"fontSize": "12px"})
+        ], style={
+            "color": "red", "padding": "10px", 
+            "border": "1px solid red", "borderRadius": "5px",
+            "marginTop": "10px", "marginBottom": "10px"
+        })
+# --- END MODIFIED FUNCTION ---
 
 
 # Callback 1: Handle inputs and show thinking indicator
 @app.callback(
-    # ... (Outputs are unchanged) ...
     [Output("chat-messages", "children", allow_duplicate=True),
      Output("chat-input-fixed", "value", allow_duplicate=True),
      Output("welcome-container", "className", allow_duplicate=True),
@@ -338,7 +377,6 @@ def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
      Output("chat-list", "children", allow_duplicate=True),
      Output("chat-history-store", "data", allow_duplicate=True),
      Output("session-store", "data", allow_duplicate=True)],
-    # ... (Inputs and States are unchanged) ...
     [Input("suggestion-1", "n_clicks"),
      Input("suggestion-2", "n_clicks"),
      Input("suggestion-3", "n_clicks"),
@@ -365,7 +403,7 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
                       s1_text, s2_text, s3_text, s4_text, input_value, current_messages,
                       welcome_class, current_chat_list, chat_history, session_data,
                       followup_ids):
-    # ... (This function is unchanged) ...
+    # ... (This function is unchanged from the file you provided) ...
     ctx = callback_context
     if not ctx.triggered:
         return [no_update] * 8
@@ -558,11 +596,9 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
         prefix_style = {"fontWeight": "600", "marginRight": "5px"}
         container_style = {"paddingTop": "10px", "marginTop": "10px", "borderTop": "1px solid #eee"}
         suggestion_div = html.Div(style=container_style)
+        
         try:
-            # --- MODIFICATION: Pass user_token ---
             suggestions = get_followup_questions(user_input, response_text_for_context, user_token=user_token)
-            # --- END MODIFICATION ---
-            
             suggestion_elements = []
             if suggestions.get("better_prompt"):
                 suggestion_elements.append(
@@ -587,12 +623,15 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 )
             if suggestion_elements:
                 suggestion_div = html.Div(suggestion_elements, style=container_style)
-            else:
-                suggestion_div = html.Div()
+            
         except Exception as e:
+            # --- MODIFICATION: Show error in UI ---
             logger.error(f"Failed to generate follow-up suggestions: {e}")
-            suggestion_div = html.Div()
-
+            suggestion_div = html.Div([
+                html.Strong("Error generating suggestions:", style={"color": "red"}),
+                html.Pre(str(e), style={"fontSize": "12px", "color": "red"})
+            ], style=container_style)
+        
         bot_response = html.Div([
             html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
             html.Div([
@@ -603,7 +642,7 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                         html.Button(id={"type": "thumbs-down", "index": msg_id, "conv_id": conv_id}, className="thumbs-down-button")
                     ], className="message-actions")
                 ], className="message-footer"),
-                suggestion_div
+                suggestion_div # This will now show suggestions OR an error
             ], className="message-content")
         ], className="bot-message message")
         
@@ -616,7 +655,7 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
         return updated_messages, chat_history, {"trigger": False, "message": ""}, False, new_session_data
         
     except Exception as e:
-        logger.error(f"Error in get_model_response: {e}")
+        logger.error(f"Error in get_model_response: {e}", exc_info=True)
         error_msg = f"Sorry, I encountered an error: {str(e)}. Please try again later."
         error_response = html.Div([
             html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
@@ -802,7 +841,7 @@ def toggle_query_visibility(n_clicks, current_class):
     return "query-code-container hidden", "Show code"
 
 
-# --- MODIFIED CALLBACK: Toggle Chart Visibility ---
+# --- NEW CALLBACK: Toggle Chart Visibility ---
 @app.callback(
     [Output({"type": "chart-container", "index": MATCH}, "className"),
      Output({"type": "toggle-chart-text", "index": MATCH}, "children")],
@@ -811,18 +850,18 @@ def toggle_query_visibility(n_clicks, current_class):
     prevent_initial_call=True
 )
 def toggle_chart_visibility(n_clicks, current_class):
-    # This logic is now correct for the new default "visible" state
-    if n_clicks and "visible" in current_class:
-        # It was visible, so n_clicks=1, 3, 5... will hide it
+    if n_clicks is None: # Initial load
+        return "query-code-container visible", "Hide Chart"
+
+    if "visible" in current_class:
         return "query-code-container hidden", "Show Chart"
     else:
-        # It was hidden (or n_clicks=0), so n_clicks=2, 4, 6... will show it
         return "query-code-container visible", "Hide Chart"
-# --- END MODIFIED CALLBACK ---
+# --- END NEW CALLBACK ---
 
 
 # ... (Callbacks for welcome text modal are unchanged) ...
-# Callback 11: Open welcome text modal
+# Callback 12: Open welcome text modal
 @app.callback(
     [Output("edit-welcome-modal", "is_open", allow_duplicate=True),
      Output("welcome-title-input", "value"),
@@ -845,7 +884,7 @@ def open_modal(n_clicks, current_title, current_description, s1, s2, s3, s4):
         return [no_update] * 7
     return True, current_title, current_description, s1, s2, s3, s4
 
-# Callback 12: Save/Close welcome text modal
+# Callback 13: Save/Close welcome text modal
 @app.callback(
     [Output("welcome-title", "children", allow_duplicate=True),
      Output("welcome-description", "children", allow_duplicate=True),
@@ -884,7 +923,7 @@ def handle_modal_actions(save_clicks, close_clicks,
         return [title, description, *suggestions, False]
     return [no_update] * 7
 
-# Callback 13: Generate insights
+# Callback 14: Generate insights
 @app.callback(
     Output({"type": "insight-output", "index": MATCH}, "children"),
     Input({"type": "insight-button", "index": MATCH}, "n_clicks"),
