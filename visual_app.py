@@ -3,7 +3,7 @@ from dash import html, dcc, Input, Output, State, callback, ALL, MATCH, callback
 import dash_bootstrap_components as dbc
 import json
 import logging
-import flask
+import dash.flask
 from genieroom import genie_query, record_feedback
 import pandas as pd
 import os
@@ -26,7 +26,7 @@ def get_user_token_from_header():
     """Reads the user token from the request headers."""
     try:
         header_name = 'X-Databricks-User-Token' # Change if needed
-        token = flask.request.headers.get(header_name)
+        token = dash.flask.request.headers.get(header_name)
         if token:
             return token
     except Exception:
@@ -194,12 +194,12 @@ app.layout = html.Div([
 ])
 
 def format_sql_query(sql_query):
-    return sqlparse.format(
-        sql_query, keyword_case='upper', reindent=True, indent_width=2
+        comma_first=False      # Commas at the end of line, not beginning
     )
+    return formatted_sql
 
+# --- MODIFICATION: Function now ONLY uses user-level access ---
 def call_llm_for_insights(df, prompt=None, user_token: str = None):
-    # ... (This function is unchanged from the file you provided) ...
     if prompt is None:
         prompt = (
             "You are a professional data analyst. Given the following table data, "
@@ -210,12 +210,14 @@ def call_llm_for_insights(df, prompt=None, user_token: str = None):
     csv_data = df.to_csv(index=False)
     full_prompt = f"{prompt}Table data:\n{csv_data}"
     try:
+        # --- MODIFICATION: Removed Service Principal fallback ---
         if user_token:
             client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
             logger.info("call_llm_for_insights: Using user token.")
         else:
-            client = WorkspaceClient() # Fallback to SP
-            logger.warning("call_llm_for_insights: No user token, falling back to Service Principal.")
+            logger.error("call_llm_for_insights: No user token provided. Cannot generate insights.")
+            return "Error: Could not authenticate user. Please refresh the page to get a new token."
+        # --- END MODIFICATION ---
         
         response = client.serving_endpoints.query(
             os.getenv("SERVING_ENDPOINT_NAME"),
@@ -226,7 +228,7 @@ def call_llm_for_insights(df, prompt=None, user_token: str = None):
         logger.error(f"Error generating insights: {e}")
         return f"Error generating insights: {str(e)}"
 
-# --- MODIFICATION: Make function raise error ---
+# --- MODIFICATION: Function now ONLY uses user-level access ---
 def get_followup_questions(user_query: str, bot_response: str, user_token: str = None) -> dict:
     SUGGESTION_ENDPOINT_NAME = os.environ.get("SUGGESTION_ENDPOINT_NAME")
     if not SUGGESTION_ENDPOINT_NAME:
@@ -240,12 +242,15 @@ def get_followup_questions(user_query: str, bot_response: str, user_token: str =
     JSON:
     """
     try:
+        # --- MODIFICATION: Removed Service Principal fallback ---
         if user_token:
             client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
             logger.info("get_followup_questions: Using user token.")
         else:
-            client = WorkspaceClient() # Fallback to SP
-            logger.warning("get_followup_questions: No user token, falling back to Service Principal.")
+            logger.error("get_followup_questions: No user token provided. Cannot get suggestions.")
+            # This error will be caught by the outer try/except and displayed in the UI.
+            raise ValueError("Could not authenticate user for suggestions. Please refresh the page.")
+        # --- END MODIFICATION ---
         
         payload = {
             "prompt": prompt, "max_tokens": 200, "temperature": 0.5
@@ -327,7 +332,9 @@ def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
             if unique_count > 0 and unique_count <= 8:
                 fig = px.pie(plot_df, names=cat_col, values=num_col, title=f"Distribution of {num_col} by {cat_col}")
                 logger.info(f"Smart Chart: Detected few categories, creating Pie Chart ({num_col} vs {cat_col})")
-            elif unique_count > 0 and unique_count <= 50:
+            # --- MODIFICATION: Removed the upper limit on categories ---
+            elif unique_count > 0:
+            # --- END MODIFICATION ---
                 plot_df = plot_df.sort_values(by=num_col, ascending=False)
                 fig = px.bar(plot_df, x=cat_col, y=num_col, title=f"{num_col} by {cat_col}")
                 logger.info(f"Smart Chart: Detected categories, creating Bar Chart ({num_col} vs {cat_col})")
