@@ -2,8 +2,12 @@ import dash
 from dash import html, dcc, Input, Output, State, callback, ALL, MATCH, callback_context, no_update, clientside_callback, dash_table
 import dash_bootstrap_components as dbc
 import json
-import logging
-import dash.flask
+import logging # <-- ADDED
+
+# --- MODIFICATION: Import dash.flask to access request headers ---
+import flask
+
+# --- MODIFICATION: Import your updated functions ---
 from genieroom import genie_query, record_feedback
 import pandas as pd
 import os
@@ -11,39 +15,46 @@ from dotenv import load_dotenv
 import sqlparse
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
-
-# --- NEW IMPORTS ---
-import plotly.express as px
-import plotly.graph_objects as go
-# --- END NEW IMPORTS ---
+import plotly.express as px # <-- ADDED
+import numpy as np # <-- ADDED
 
 load_dotenv()
+# --- ADDED: Set up logger ---
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+# --- MODIFICATION: Helper function to get user token ---
 def get_user_token_from_header():
     """Reads the user token from the request headers."""
     try:
-        header_name = 'X-Databricks-User-Token' # Change if needed
-        token = dash.flask.request.headers.get(header_name)
+        # --- !!!  ACTION REQUIRED  !!! ---
+        # You may need to change this header name.
+        # Common names: 'X-Databricks-User-Token', 'X-Forwarded-Access-Token'
+        header_name = 'X-Databricks-User-Token'
+        token = flask.request.headers.get(header_name)
+        
         if token:
+            # logger.info(f"Found user token in header '{header_name}'.")
             return token
-    except Exception:
+    except Exception as e:
+        # This will fail if not in a request context (e.g., on startup)
+        logger.debug(f"Not in request context or header not found: {e}")
         pass
-    logger.warning("Could not find user token in request headers. Will use fallback.")
+    
+    logger.warning(f"Could not find user token in request headers. Will use fallback.")
     return None
+# --- END MODIFICATION ---
+
 
 # Create Dash app
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.BOOTSTRAP],
-    # Suppress callback exceptions for the new dynamic components
-    suppress_callback_exceptions=True 
+    external_stylesheets=[dbc.themes.BOOTSTRAP]
 )
-server = app.server
+server = app.server # Expose server for Gunicorn
 
-# ... (Default welcome text/suggestions are unchanged) ...
+# ... (DEFAULT_WELCOME_TITLE, DEFAULT_SUGGESTIONS are all unchanged) ...
 DEFAULT_WELCOME_TITLE = "Supply Chain Optimization"
 DEFAULT_WELCOME_DESCRIPTION = "Analyze your Supply Chain Performance leveraging AI/BI Dashboard. Deep dive into your data and metrics."
 DEFAULT_SUGGESTIONS = [
@@ -53,12 +64,13 @@ DEFAULT_SUGGESTIONS = [
     "What was the demand for our products by week in 2024?"
 ]
 
-
 # Define the layout
 app.layout = html.Div([
-    # ... (Top navigation bar is unchanged) ...
+    # Top navigation bar
     html.Div([
+        # Left component containing both nav-left and sidebar
         html.Div([
+            # Nav left
             html.Div([
                 html.Button([
                     html.Img(src="assets/menu_icon.svg", className="menu-icon")
@@ -67,11 +79,12 @@ app.layout = html.Div([
                     html.Img(src="assets/plus_icon.svg", className="new-chat-icon")
                 ], id="new-chat-button", className="nav-button",disabled=False),
                 html.Button([
-                    html.Img(src="assets/plus_icon.svg", className="new-chat-icon"),
+                    html.Img(src="assets.svg", className="new-chat-icon"),
                     html.Div("New chat", className="new-chat-text")
                 ], id="sidebar-new-chat-button", className="new-chat-button",disabled=False)
             ], id="nav-left", className="nav-left"),
             
+            # Sidebar
             html.Div([
                 html.Div([
                     html.Div("Your conversations with Genie", className="sidebar-header-text"),
@@ -97,16 +110,19 @@ app.layout = html.Div([
         ], className="nav-right")
     ], className="top-nav"),
     
-    # ... (Main content area is unchanged) ...
+    # Main content area
     html.Div([
         html.Div([
+            # Chat content
             html.Div([
+                # Welcome container
                 html.Div([
                     html.Div([html.Div([
                     html.Div(className="genie-logo")
                 ], className="genie-logo-container")],
                 className="genie-logo-container-header"),
                 
+                    # Add settings button with tooltip
                     html.Div([
                         html.Div(id="welcome-title", className="welcome-message", children=DEFAULT_WELCOME_TITLE),
                         html.Button([
@@ -122,64 +138,133 @@ app.layout = html.Div([
                              className="welcome-message-description",
                              children=DEFAULT_WELCOME_DESCRIPTION),
                     
+                    # Add modal for editing welcome text
                     dbc.Modal([
                         dbc.ModalHeader(dbc.ModalTitle("Customize Welcome Message")),
                         dbc.ModalBody([
                             html.Div([
                                 html.Label("Welcome Title", className="modal-label"),
-                                dbc.Input(id="welcome-title-input", type="text", placeholder="Enter a title...", className="modal-input"),
-                                html.Small("This title appears at the top of your welcome screen", className="text-muted d-block mt-1")
+                                dbc.Input(
+                                    id="welcome-title-input",
+                                    type="text",
+                                    placeholder="Enter a title for your welcome message",
+                                    className="modal-input"
+                                ),
+                                html.Small(
+                                    "This title appears at the top of your welcome screen",
+                                    className="text-muted d-block mt-1"
+                                )
                             ], className="modal-input-group"),
                             html.Div([
                                 html.Label("Welcome Description", className="modal-label"),
-                                dbc.Textarea(id="welcome-description-input", placeholder="Enter a description...", className="modal-input", style={"height": "80px"}),
-                                html.Small("This description appears below the title", className="text-muted d-block mt-1")
+                                dbc.Textarea(
+                                    id="welcome-description-input",
+                                    placeholder="Enter a description that helps users understand the purpose of your application",
+                                    className="modal-input",
+                                    style={"height": "80px"}
+                                ),
+                                html.Small(
+                                    "This description appears below the title and helps guide your users",
+                                    className="text-muted d-block mt-1"
+                                )
                             ], className="modal-input-group"),
                             html.Div([
                                 html.Label("Suggestion Questions", className="modal-label"),
-                                html.Small("Customize the four suggestion questions", className="text-muted d-block mb-3"),
-                                dbc.Input(id="suggestion-1-input", type="text", placeholder="First suggestion", className="modal-input mb-2"),
-                                dbc.Input(id="suggestion-2-input", type="text", placeholder="Second suggestion", className="modal-input mb-2"),
-                                dbc.Input(id="suggestion-3-input", type="text", placeholder="Third suggestion", className="modal-input mb-2"),
-                                dbc.Input(id="suggestion-4-input", type="text", placeholder="Fourth suggestion", className="modal-input")
+                                html.Small(
+                                    "Customize the four suggestion questions that appear on the welcome screen",
+                                    className="text-muted d-block mb-3"
+                                ),
+                                dbc.Input(
+                                    id="suggestion-1-input",
+                                    type="text",
+                                    placeholder="First suggestion question",
+                                    className="modal-input mb-2"
+                                ),
+                                dbc.Input(
+                                    id="suggestion-2-input",
+                                    type="text",
+                                    placeholder="Second suggestion question",
+                                    className="modal-input mb-2"
+                                ),
+                                dbc.Input(
+                                    id="suggestion-3-input",
+                                    type="text",
+                                    placeholder="Third suggestion question",
+                                    className="modal-input mb-2"
+                                ),
+                                dbc.Input(
+                                    id="suggestion-4-input",
+                                    type="text",
+                                    placeholder="Fourth suggestion question",
+                                    className="modal-input"
+                                )
                             ], className="modal-input-group")
                         ]),
                         dbc.ModalFooter([
-                            dbc.Button("Cancel", id="close-modal", className="modal-button", color="light"),
-                            dbc.Button("Save Changes", id="save-welcome-text", className="modal-button-primary", color="primary")
+                            dbc.Button(
+                                "Cancel",
+                                id="close-modal",
+                                className="modal-button",
+                                color="light"
+                            ),
+                            dbc.Button(
+                                "Save Changes",
+                                id="save-welcome-text",
+                                className="modal-button-primary",
+                                color="primary"
+                            )
                         ])
                     ], id="edit-welcome-modal", is_open=False, size="lg", backdrop="static"),
                     
+                    # Suggestion buttons with IDs
                     html.Div([
                         html.Button([
                             html.Div(className="suggestion-icon"),
-                            html.Div(DEFAULT_SUGGESTIONS[0], className="suggestion-text", id="suggestion-1-text")
+                            html.Div(DEFAULT_SUGGESTIONS[0], 
+                                     className="suggestion-text", id="suggestion-1-text")
                         ], id="suggestion-1", className="suggestion-button"),
                         html.Button([
                             html.Div(className="suggestion-icon"),
-                            html.Div(DEFAULT_SUGGESTIONS[1], className="suggestion-text", id="suggestion-2-text")
+                            html.Div(DEFAULT_SUGGESTIONS[1],
+                                     className="suggestion-text", id="suggestion-2-text")
                         ], id="suggestion-2", className="suggestion-button"),
                         html.Button([
                             html.Div(className="suggestion-icon"),
-                            html.Div(DEFAULT_SUGGESTIONS[2], className="suggestion-text", id="suggestion-3-text")
+                            html.Div(DEFAULT_SUGGESTIONS[2],
+                                     className="suggestion-text", id="suggestion-3-text")
                         ], id="suggestion-3", className="suggestion-button"),
                         html.Button([
                             html.Div(className="suggestion-icon"),
-                            html.Div(DEFAULT_SUGGESTIONS[3], className="suggestion-text", id="suggestion-4-text")
+                            html.Div(DEFAULT_SUGGESTIONS[3],
+                                     className="suggestion-text", id="suggestion-4-text")
                         ], id="suggestion-4", className="suggestion-button")
                     ], className="suggestion-buttons")
                 ], id="welcome-container", className="welcome-container visible"),
                 
+                # Chat messages
                 html.Div([], id="chat-messages", className="chat-messages"),
             ], id="chat-content", className="chat-content"),
             
+            # Input area
             html.Div([
                 html.Div([
-                    dcc.Input(id="chat-input-fixed", placeholder="Ask your question...", className="chat-input", type="text", disabled=False),
+                    dcc.Input(
+                        id="chat-input-fixed",
+                        placeholder="Ask your question...",
+                        className="chat-input",
+                        type="text",
+                        disabled=False
+                    ),
                     html.Div([
-                        html.Button(id="send-button-fixed", className="input-button send-button", disabled=False)
+                        html.Button(
+                            id="send-button-fixed", 
+                            className="input-button send-button",
+                            disabled=False
+                        )
                     ], className="input-buttons-right"),
-                    html.Div("You can only submit one query at a time", id="query-tooltip", className="query-tooltip hidden")
+                    html.Div("You can only submit one query at a time", 
+                           id="query-tooltip", 
+                           className="query-tooltip hidden")
                 ], id="fixed-input-container", className="fixed-input-container"),
                 html.Div("Always review the accuracy of responses.", className="disclaimer-fixed")
             ], id="fixed-input-wrapper", className="fixed-input-wrapper"),
@@ -188,28 +273,24 @@ app.layout = html.Div([
     
     html.Div(id='dummy-output'),
     dcc.Store(id="chat-trigger", data={"trigger": False, "message": "", "conversation_id": None}),
-    dcc.Store(id="chat-history-store", data=[], storage_type='session'),
+    dcc.Store(id="chat-history-store", data=[]),
     dcc.Store(id="query-running-store", data=False),
-    dcc.Store(id="session-store", data={"current_session": None, "conversation_id": None}, storage_type='session')
+    # Modified session-store to hold both UI session index and backend conversation_id
+    dcc.Store(id="session-store", data={"current_session": None, "conversation_id": None})
 ])
 
-# --- FIXED INDENTATION ERROR ---
 def format_sql_query(sql_query):
     """Format SQL query using sqlparse library"""
-    formatted_sql = sqlparse.format(
-        sql_query,
-        keyword_case='upper',  # Makes keywords uppercase
-        identifier_case=None,  # Preserves identifier case
-        reindent=True,         # Adds proper indentation
-        indent_width=2,        # Indentation width
-        strip_comments=False,  # Preserves comments
-        comma_first=False      # Commas at the end of line, not beginning
+    return sqlparse.format(
+        sql_query, keyword_case='upper', reindent=True, indent_width=2
     )
-    return formatted_sql
-# --- END FIX ---
 
-# --- MODIFICATION: Function now ONLY uses user-level access ---
-def call_llm_for_insights(df, prompt=None, user_token: str = None):
+def call_llm_for_insights(df, prompt=None):
+    """
+    Call an LLM to generate insights from a DataFrame.
+    NOTE: This uses WorkspaceClient() which will use the environment variables.
+    This call will likely run as the Service Principal, NOT the user.
+    """
     if prompt is None:
         prompt = (
             "You are a professional data analyst. Given the following table data, "
@@ -220,15 +301,11 @@ def call_llm_for_insights(df, prompt=None, user_token: str = None):
     csv_data = df.to_csv(index=False)
     full_prompt = f"{prompt}Table data:\n{csv_data}"
     try:
-        # --- MODIFICATION: Removed Service Principal fallback ---
-        if user_token:
-            client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
-            logger.info("call_llm_for_insights: Using user token.")
-        else:
-            logger.error("call_llm_for_insights: No user token provided. Cannot generate insights.")
-            return "Error: Could not authenticate user. Please refresh the page to get a new token."
-        # --- END MODIFICATION ---
+        client = WorkspaceClient() # Uses SP env vars
         
+        # --- THIS PAYLOAD IS FOR CHAT MODELS ---
+        # If your endpoint is NOT a chat model, you may need to change this
+        # to: request={"prompt": full_prompt}
         response = client.serving_endpoints.query(
             os.getenv("SERVING_ENDPOINT_NAME"),
             messages=[ChatMessage(content=full_prompt, role=ChatMessageRole.USER)],
@@ -237,151 +314,142 @@ def call_llm_for_insights(df, prompt=None, user_token: str = None):
     except Exception as e:
         logger.error(f"Error generating insights: {e}")
         return f"Error generating insights: {str(e)}"
+    
 
-# --- MODIFICATION: Function now ONLY uses user-level access ---
-def get_followup_questions(user_query: str, bot_response: str, user_token: str = None) -> dict:
+# --- NEW FUNCTION: To get follow-up suggestions ---
+def get_followup_questions(user_query: str, bot_response: str) -> dict:
+    """
+    Calls a serving endpoint to get follow-up question suggestions.
+    """
+    # --- !!! ACTION REQUIRED !!! ---
+    # Add a new variable to your .env file:
+    # SUGGESTION_ENDPOINT_NAME=your-suggestion-model-endpoint-name
     SUGGESTION_ENDPOINT_NAME = os.environ.get("SUGGESTION_ENDPOINT_NAME")
     if not SUGGESTION_ENDPOINT_NAME:
         logger.warning("SUGGESTION_ENDPOINT_NAME not set. Skipping follow-up questions.")
-        return {} # Return empty dict, not an error
+        return {}
+
+    # The prompt asks for JSON output for easy parsing.
     prompt = f"""
     Given a user's question and a chatbot's answer, generate one "better" version of the user's question and two relevant follow-up questions.
     Return ONLY a single valid JSON object with the keys "better_prompt", "followup1", and "followup2".
+
     User Question: "{user_query}"
     Chatbot Answer: "{bot_response[:1000]}"
+
     JSON:
     """
+
     try:
-        # --- MODIFICATION: Removed Service Principal fallback ---
-        if user_token:
-            client = WorkspaceClient(host=os.getenv("DATABRICKS_HOST"), token=user_token)
-            logger.info("get_followup_questions: Using user token.")
-        else:
-            logger.error("get_followup_questions: No user token provided. Cannot get suggestions.")
-            # This error will be caught by the outer try/except and displayed in the UI.
-            raise ValueError("Could not authenticate user for suggestions. Please refresh the page.")
-        # --- END MODIFICATION ---
+        client = WorkspaceClient() # Uses SP env vars
         
+        # --- !!! ACTION REQUIRED !!! ---
+        # This payload assumes a model that accepts a 'prompt'.
+        # If your model expects 'messages', change this to:
+        # request={"messages": [{"role": "user", "content": prompt}]}
         payload = {
-            "prompt": prompt, "max_tokens": 200, "temperature": 0.5
+            "prompt": prompt,
+            "max_tokens": 200,
+            "temperature": 0.5
         }
+
         response = client.serving_endpoints.query(
             SUGGESTION_ENDPOINT_NAME,
             request=payload
         )
+
+        # Parse the response. This is highly dependent on your model.
+        # This assumes the model returns: {"predictions": ["{\"better_prompt\": ...}"]}
         if "predictions" in response and response.predictions:
+            # Clean up potential markdown/fencing
             json_str = response.predictions[0].strip().replace("```json", "").replace("```", "")
             data = json.loads(json_str)
-            return data
+            return {
+                "better_prompt": data.get("better_prompt"),
+                "followup1": data.get("followup1"),
+                "followup2": data.get("followup2"),
+            }
         else:
             logger.warning(f"Unexpected response from suggestion endpoint: {response}")
             return {}
+
     except Exception as e:
-        # Re-raise the exception so the calling function can display it
         logger.error(f"Error getting follow-up questions: {e}")
-        raise e
-# --- END MODIFICATION ---
+        return {}
+# --- END NEW FUNCTION ---
 
 
-# --- MODIFICATION: Robust Smart Chart Function ---
-def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
+# --- NEW FUNCTION: To generate visualizations ---
+MAX_CATEGORICAL_UNIQUE = 50 # Cap for bar charts
+
+def generate_visualizations(df: pd.DataFrame) -> list:
     """
-    Analyzes a DataFrame and returns an interactive dcc.Graph component
-    or a visible error message.
+    Analyzes a DataFrame and generates a list of Plotly graphs
+    for univariate analysis.
     """
-    try:
-        plot_df = df.copy()
-
-        # --- NEW ROBUST CONVERSION STEP ---
-        for col in plot_df.columns:
-            # Try to convert to numeric first, this is safer
-            try:
-                converted_num = pd.to_numeric(plot_df[col], errors='coerce')
-                # Check if conversion was successful (at least 50% numbers)
-                if converted_num.notna().sum() / len(plot_df) > 0.5:
-                    # Check if it's an integer-like float (e.g., 2024.0)
-                    if (converted_num % 1 == 0).all():
-                        # Don't treat integer IDs or Years as dates
-                        if converted_num.nunique() > 50 or converted_num.min() > 1900:
-                             plot_df[col] = converted_num
-                             continue # Skip date conversion for this column
-                    else:
-                        plot_df[col] = converted_num
-                        continue # Skip date conversion for this column
-            except Exception:
-                pass # Not a number
-
-            # Try to convert to datetime
-            try:
-                converted_date = pd.to_datetime(plot_df[col], errors='coerce')
-                if converted_date.notna().sum() / len(plot_df) > 0.5:
-                    plot_df[col] = converted_date
-            except Exception:
-                pass # Not a date
-        # --- END NEW CONVERSION STEP ---
-
-        # Now, the dtype selection should be more accurate
-        numerics = plot_df.select_dtypes(include=['number']).columns.tolist()
-        objects = plot_df.select_dtypes(include=['object', 'category']).columns.tolist()
-        date_cols = plot_df.select_dtypes(include=['datetime', 'datetimetz']).columns.tolist()
-
-        fig = None
-        
-        # Rule 1: Time Series (Date + Number)
-        if date_cols and numerics:
-            date_col, num_col = date_cols[0], numerics[0]
-            plot_df = plot_df.sort_values(by=date_col)
-            fig = px.line(plot_df, x=date_col, y=num_col, title=f"{num_col} over {date_col}", markers=True)
-            logger.info(f"Smart Chart: Detected Time Series, creating Line Chart ({num_col} vs {date_col})")
-
-        # Rule 2: Categorical + Numeric (Bar or Pie)
-        elif objects and numerics:
-            cat_col, num_col = objects[0], numerics[0]
-            unique_count = plot_df[cat_col].nunique()
-            
-            if unique_count > 0 and unique_count <= 8:
-                fig = px.pie(plot_df, names=cat_col, values=num_col, title=f"Distribution of {num_col} by {cat_col}")
-                logger.info(f"Smart Chart: Detected few categories, creating Pie Chart ({num_col} vs {cat_col})")
-            # --- MODIFICATION: Removed the upper limit on categories ---
-            elif unique_count > 0:
-            # --- END MODIFICATION ---
-                plot_df = plot_df.sort_values(by=num_col, ascending=False)
-                fig = px.bar(plot_df, x=cat_col, y=num_col, title=f"{num_col} by {cat_col}")
-                logger.info(f"Smart Chart: Detected categories, creating Bar Chart ({num_col} vs {cat_col})")
-            else:
-                 logger.info(f"Smart Chart: Too many categories ({unique_count}) for a bar chart.")
-
-        # Rule 3: Scatter Plot (2 Numerics)
-        elif len(numerics) >= 2:
-            num_col_1, num_col_2 = numerics[0], numerics[1]
-            fig = px.scatter(df, x=num_col_1, y=num_col_2, title=f"{num_col_2} vs. {num_col_1}",
-                             trendline="ols", trendline_color_override="red")
-            logger.info(f"Smart Chart: Detected 2+ numerics, creating Scatter Plot ({num_col_2} vs {num_col_1})")
-        
-        if fig:
-            fig.update_layout(
-                template="plotly_white", title_x=0.5,
-                margin=dict(l=20, r=20, t=50, b=20),
-                paper_bgcolor="rgba(0,0,0,0)",
-                plot_bgcolor="rgba(0,0,0,0)"
-            )
-            return dcc.Graph(id=chart_id, figure=fig)
-        
-        logger.info("Smart Chart: No suitable chart type found for the data.")
-        return None # Return None, not an error, if no chart is suitable
+    visuals = []
     
-    except Exception as e:
-        logger.error(f"Error creating smart chart: {e}")
-        # --- MODIFICATION: Return a visible error message ---
-        return html.Div([
-            html.Strong("Error creating chart:"),
-            html.Pre(str(e), style={"fontSize": "12px"})
-        ], style={
-            "color": "red", "padding": "10px", 
-            "border": "1px solid red", "borderRadius": "5px",
-            "marginTop": "10px", "marginBottom": "10px"
-        })
-# --- END MODIFIED FUNCTION ---
+    # Base layout for small, clean charts
+    chart_layout = {
+        "margin": dict(t=30, b=20, l=30, r=20),
+        "height": 300,
+        "template": "plotly_white",
+        "title_font_size": 14,
+    }
+
+    for col in df.columns:
+        try:
+            col_type = df[col].dtype
+            
+            if pd.api.types.is_numeric_dtype(col_type):
+                # --- Numeric: Use a histogram ---
+                fig = px.histogram(df, x=col, title=f"Distribution of '{col}'")
+                fig.update_layout(chart_layout)
+                visuals.append(html.Div([
+                    dcc.Graph(figure=fig)
+                ], className="visual-item"))
+
+            elif pd.api.types.is_datetime_dtype(col_type) or (np.issubdtype(col_type, np.datetime64)):
+                # --- Datetime: Use a histogram (time series count) ---
+                fig = px.histogram(df, x=col, title=f"Count over time for '{col}'")
+                fig.update_layout(chart_layout)
+                visuals.append(html.Div([
+                    dcc.Graph(figure=fig)
+                ], className="visual-item"))
+
+            elif pd.api.types.is_object_dtype(col_type) or pd.api.types.is_categorical_dtype(col_type):
+                # --- Categorical/Object: Use a bar chart of value counts ---
+                unique_count = df[col].nunique()
+                
+                if unique_count == 0 or unique_count > (df.shape[0] * 0.9):
+                    # Skip columns that are all unique (like IDs) or all null
+                    continue
+
+                if unique_count > MAX_CATEGORICAL_UNIQUE:
+                    # Too many unique values, plot top N
+                    top_n = df[col].value_counts().nlargest(MAX_CATEGORICAL_UNIQUE).reset_index()
+                    top_n.columns = [col, 'count']
+                    title = f"Top {MAX_CATEGORICAL_UNIQUE} values for '{col}' (of {unique_count})"
+                    fig = px.bar(top_n, x=col, y='count', title=title)
+                else:
+                    # Few enough unique values, plot all
+                    title = f"Value counts for '{col}'"
+                    # Use histogram to let plotly do the value counting
+                    fig = px.histogram(df, x=col, title=title).update_xaxes(categoryorder='total descending')
+                
+                fig.update_layout(chart_layout)
+                visuals.append(html.Div([
+                    dcc.Graph(figure=fig)
+                ], className="visual-item"))
+        
+        except Exception as e:
+            logger.warning(f"Could not generate visual for column {col}: {e}")
+
+    if not visuals:
+        return [html.Div("Could not generate any automatic visuals for this dataset.", className="insight-content")]
+        
+    return [html.Div(visuals, className="visual-container")]
+# --- END NEW FUNCTION ---
 
 
 # Callback 1: Handle inputs and show thinking indicator
@@ -400,6 +468,7 @@ def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
      Input("suggestion-4", "n_clicks"),
      Input("send-button-fixed", "n_clicks"),
      Input("chat-input-fixed", "n_submit"),
+     # --- MODIFICATION: Add new Input for follow-up suggestions ---
      Input({"type": "followup-suggestion", "index": ALL}, "n_clicks")],
     [State("suggestion-1-text", "children"),
      State("suggestion-2-text", "children"),
@@ -411,60 +480,82 @@ def create_smart_chart(df: pd.DataFrame, chart_id: str) -> html.Div:
      State("chat-list", "children"),
      State("chat-history-store", "data"),
      State("session-store", "data"),
+     # --- MODIFICATION: Add new State for follow-up suggestions ---
      State({"type": "followup-suggestion", "index": ALL}, "id")
     ],
     prevent_initial_call=True
 )
 def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, submit_clicks,
-                      followup_clicks,
+                      followup_clicks, # <--- New argument
                       s1_text, s2_text, s3_text, s4_text, input_value, current_messages,
                       welcome_class, current_chat_list, chat_history, session_data,
-                      followup_ids):
-    # ... (This function is unchanged from the file you provided) ...
+                      followup_ids): # <--- New argument
     ctx = callback_context
     if not ctx.triggered:
         return [no_update] * 8
+
     trigger_id_str = ctx.triggered[0]["prop_id"].split(".")[0]
+    
     suggestion_map = {
         "suggestion-1": s1_text, "suggestion-2": s2_text,
         "suggestion-3": s3_text, "suggestion-4": s4_text
     }
+    
     user_input = None
+
+    # --- MODIFICATION: Check for follow-up suggestion clicks first ---
     if "followup-suggestion" in trigger_id_str:
         try:
+            # User clicked one of the new follow-up buttons
             trigger_id_dict = json.loads(trigger_id_str)
             user_input = trigger_id_dict.get("text")
-        except: pass
+        except:
+            pass # Ignore if parse fails
     elif trigger_id_str in suggestion_map:
+        # User clicked a welcome suggestion
         user_input = suggestion_map[trigger_id_str]
     else:
+        # User typed or clicked send
         user_input = input_value
+    # --- END MODIFICATION ---
+
     if not user_input:
         return [no_update] * 8
+    
+    # Create user message
     user_message = html.Div([
         html.Div([html.Div("Y", className="user-avatar"), html.Span("You", className="model-name")], className="user-info"),
         html.Div(user_input, className="message-text")
     ], className="user-message message")
     updated_messages = (current_messages or []) + [user_message]
+    
+    # Add thinking indicator
     thinking_indicator = html.Div([
         html.Div([html.Span(className="spinner"), html.Span("Thinking...")], className="thinking-indicator")
     ], className="bot-message message")
     updated_messages.append(thinking_indicator)
+    
+    # Handle session management
     current_session_index = session_data.get("current_session")
     current_conv_id = session_data.get("conversation_id")
+
     if current_session_index is None:
-        current_session_index = 0
+        current_session_index = 0 # New chat will be at index 0
+    
     chat_history = chat_history or []
+    
     if current_session_index < len(chat_history):
         chat_history[current_session_index]["messages"] = updated_messages
         chat_history[current_session_index]["queries"].append(user_input)
     else:
         chat_history.insert(0, {
             "session_id": current_session_index,
-            "backend_conversation_id": current_conv_id,
+            "backend_conversation_id": current_conv_id, # Store existing ID
             "queries": [user_input],
             "messages": updated_messages
         })
+    
+    # Update chat list
     updated_chat_list = []
     for i, session in enumerate(chat_history):
         first_query = session["queries"][0]
@@ -476,19 +567,21 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
                 id={"type": "chat-item", "index": i}
             )
         )
+    
+    # Pass conversation_id to the trigger
     trigger_data = {
         "trigger": True, 
         "message": user_input,
-        "conversation_id": current_conv_id
+        "conversation_id": current_conv_id # Pass the current backend ID
     }
     updated_session_data = {
         "current_session": current_session_index, 
         "conversation_id": current_conv_id
     }
+
     return (updated_messages, "", "welcome-container hidden",
             trigger_data, True,
             updated_chat_list, chat_history, updated_session_data)
-
 
 # Callback 2: Make API call and show response
 @app.callback(
@@ -516,7 +609,9 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
     
     try:
         conv_id, msg_id, response, query_text = genie_query(
-            user_input, conversation_id, user_token=user_token
+            user_input, 
+            conversation_id, 
+            user_token=user_token
         )
         
         if conv_id is None:
@@ -525,42 +620,34 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
                 html.Div([html.Div(error_msg, className="message-text")], className="message-content")
             ], className="bot-message message")
+            
             new_session_data = {"current_session": None, "conversation_id": None}
             updated_messages = (current_messages or [])[:-1] + [error_response]
             return updated_messages, chat_history, {"trigger": False, "message": ""}, False, new_session_data
 
         new_session_data = {**session_data, "conversation_id": conv_id}
-        response_text_for_context = ""
-        chart_section = None
+        
+        response_text_for_context = "" # For follow-up prompt
         
         if isinstance(response, str):
             content = dcc.Markdown(response, className="message-text")
             response_text_for_context = response
         else:
+            # --- THIS IS THE START OF THE MODIFIED BLOCK ---
             df = pd.DataFrame(response)
-            df_id = f"table-{len(chat_history)}-{len(current_messages)}"
-            chart_index = f"chart-{len(chat_history)}-{len(current_messages)}"
             
-            chart_component = create_smart_chart(df, chart_id={"type": "chart-graph", "index": chart_index})
-            
-            if chart_component:
-                # --- MODIFICATION: Make chart visible by default ---
-                chart_section = html.Div([
-                    html.Button([
-                        html.Span("Hide Chart", id={"type": "toggle-chart-text", "index": chart_index})
-                    ], id={"type": "toggle-chart", "index": chart_index}, className="toggle-query-button", n_clicks=0),
-                    html.Div(
-                        chart_component,
-                        id={"type": "chart-container", "index": chart_index},
-                        className="query-code-container visible" # <-- CHANGED from 'hidden'
-                    )
-                ], className="query-section")
-                # --- END MODIFICATION ---
+            # --- MODIFICATION: Use a consistent index for all related components ---
+            content_index = f"{len(chat_history)}-{len(current_messages)}"
+            df_id = f"table-{content_index}"
+            # --- END MODIFICATION ---
 
             if chat_history and len(chat_history) > 0:
                 chat_history[0].setdefault('dataframes', {})[df_id] = df.to_json(orient='split')
             else:
-                chat_history = [{"dataframes": {df_id: df.to_json(orient='split')}}]
+                # This case might be problematic, ensure chat_history[0] exists
+                if not chat_history:
+                    chat_history = [{"dataframes": {}}] 
+                chat_history[0].setdefault('dataframes', {})[df_id] = df.to_json(orient='split')
             
             data_table = dash_table.DataTable(
                 id=df_id, data=df.to_dict('records'),
@@ -576,7 +663,8 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
             query_section = None
             if query_text is not None:
                 formatted_sql = format_sql_query(query_text)
-                query_index = f"sql-{len(chat_history)}-{len(current_messages)}"
+                # --- MODIFICATION: Use content_index ---
+                query_index = content_index 
                 query_section = html.Div([
                     html.Div([
                         html.Button([
@@ -589,6 +677,21 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                     )
                 ], id={"type": "query-section", "index": query_index}, className="query-section")
             
+            # --- NEW: Add Data Type Toggle Section ---
+            dtype_index = content_index
+            data_type_section = html.Div([
+                html.Div([
+                    html.Button([
+                        html.Span("Show data types", id={"type": "toggle-dtype-text", "index": dtype_index})
+                    ], id={"type": "toggle-dtype", "index": dtype_index}, className="toggle-query-button", n_clicks=0)
+                ], className="toggle-query-container"),
+                html.Div(
+                    html.Pre(df.dtypes.to_string(), className="sql-code"), # Reuse 'sql-code' style
+                    id={"type": "dtype-code", "index": dtype_index}, className="query-code-container hidden"
+                )
+            ], className="query-section", style={"marginTop": "5px"})
+            # --- END NEW ---
+
             insight_button = html.Button(
                 "Generate Insights",
                 id={"type": "insight-button", "index": df_id},
@@ -600,55 +703,91 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 type="circle",
                 children=html.Div(id={"type": "insight-output", "index": df_id})
             )
-            
+
+            # --- NEW: Add Visuals Button and Output ---
+            visual_button = html.Button(
+                "Generate Visuals",
+                id={"type": "visual-button", "index": df_id},
+                className="insight-button",
+                style={"border": "none", "background": "#f0f0f0", "padding": "8px 16px", "borderRadius": "4px", "cursor": "pointer", "marginLeft": "10px"} # Add space
+            )
+            visual_output = dcc.Loading(
+                id={"type": "visual-loading", "index": df_id},
+                type="circle",
+                children=html.Div(id={"type": "visual-output", "index": df_id})
+            )
+            # --- END NEW ---
+
             content = html.Div([
-                chart_section if chart_section else None,
-                html.Div([data_table], style={'marginBottom': '20px', 'paddingRight': '5px'}),
+                html.Div(data_table, style={'marginBottom': '20px', 'paddingRight': '5px'}),
                 query_section if query_section else None,
-                insight_button, insight_output,
+                data_type_section, # <-- ADDED
+                html.Div([ # Wrapper for buttons
+                    insight_button,
+                    visual_button, # <-- ADDED
+                ], style={"marginTop": "10px", "display": "flex"}),
+                insight_output,
+                visual_output, # <-- ADDED
             ])
-            response_text_for_context = f"A table was returned for the query: {query_text or '...'} "
+            # --- THIS IS THE END OF THE MODIFIED BLOCK ---
+
+            response_text_for_context = f"A table was returned for the query: {query_text}"
+
+        # --- MODIFICATION: Get follow-up questions ---
         
-        pill_style = {"backgroundColor": "#f0f0f0", "border": "1px solid #ddd", "borderRadius": "16px", "padding": "6px 12px", "margin": "4px", "fontSize": "13px", "cursor": "pointer", "display": "block", "textAlign": "left", "width": "fit-content", "maxWidth": "100%", "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap", "lineHeight": "1.4"}
+        # Define inline styles for the new suggestion buttons
+        pill_style = {
+            "backgroundColor": "#f0f0f0", "border": "1px solid #ddd",
+            "borderRadius": "16px", "padding": "6px 12px", "margin": "4px",
+            "fontSize": "13px", "cursor": "pointer", "display": "block",
+            "textAlign": "left", "width": "fit-content", "maxWidth": "100%",
+            "overflow": "hidden", "textOverflow": "ellipsis", "whiteSpace": "nowrap",
+            "lineHeight": "1.4"
+        }
         prefix_style = {"fontWeight": "600", "marginRight": "5px"}
         container_style = {"paddingTop": "10px", "marginTop": "10px", "borderTop": "1px solid #eee"}
-        suggestion_div = html.Div(style=container_style)
         
+        suggestion_div = html.Div(style=container_style)
         try:
-            suggestions = get_followup_questions(user_input, response_text_for_context, user_token=user_token)
+            suggestions = get_followup_questions(user_input, response_text_for_context)
             suggestion_elements = []
+            
             if suggestions.get("better_prompt"):
                 suggestion_elements.append(
                     html.Button([
                         html.Span("💡 Better way to ask: ", style=prefix_style),
                         html.Span(suggestions["better_prompt"])
-                    ], id={"type": "followup-suggestion", "index": 0, "text": suggestions["better_prompt"]}, style=pill_style)
+                    ], id={"type": "followup-suggestion", "index": 0, "text": suggestions["better_prompt"]},
+                       style=pill_style)
                 )
             if suggestions.get("followup1"):
                 suggestion_elements.append(
                     html.Button([
                         html.Span("Relevant question: ", style=prefix_style),
                         html.Span(suggestions["followup1"])
-                    ], id={"type": "followup-suggestion", "index": 1, "text": suggestions["followup1"]}, style=pill_style)
+                    ], id={"type": "followup-suggestion", "index": 1, "text": suggestions["followup1"]},
+                       style=pill_style)
                 )
             if suggestions.get("followup2"):
                 suggestion_elements.append(
                     html.Button([
                         html.Span("Relevant question: ", style=prefix_style),
                         html.Span(suggestions["followup2"])
-                    ], id={"type": "followup-suggestion", "index": 2, "text": suggestions["followup2"]}, style=pill_style)
+                    ], id={"type": "followup-suggestion", "index": 2, "text": suggestions["followup2"]},
+                       style=pill_style)
                 )
+            
             if suggestion_elements:
                 suggestion_div = html.Div(suggestion_elements, style=container_style)
-            
+            else:
+                suggestion_div = html.Div() # Empty div, no border
+
         except Exception as e:
-            # --- MODIFICATION: Show error in UI ---
             logger.error(f"Failed to generate follow-up suggestions: {e}")
-            suggestion_div = html.Div([
-                html.Strong("Error generating suggestions:", style={"color": "red"}),
-                html.Pre(str(e), style={"fontSize": "12px", "color": "red"})
-            ], style=container_style)
-        
+            suggestion_div = html.Div() # Empty div on failure
+        # --- END MODIFICATION ---
+
+        # Create bot response
         bot_response = html.Div([
             html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
             html.Div([
@@ -659,7 +798,11 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                         html.Button(id={"type": "thumbs-down", "index": msg_id, "conv_id": conv_id}, className="thumbs-down-button")
                     ], className="message-actions")
                 ], className="message-footer"),
-                suggestion_div # This will now show suggestions OR an error
+                
+                # --- MODIFICATION: Add the new suggestion div ---
+                suggestion_div
+                # --- END MODIFICATION ---
+
             ], className="message-content")
         ], className="bot-message message")
         
@@ -672,18 +815,19 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
         return updated_messages, chat_history, {"trigger": False, "message": ""}, False, new_session_data
         
     except Exception as e:
-        logger.error(f"Error in get_model_response: {e}", exc_info=True)
+        logger.error(f"Error in get_model_response: {e}")
         error_msg = f"Sorry, I encountered an error: {str(e)}. Please try again later."
         error_response = html.Div([
             html.Div([html.Div(className="model-avatar"), html.Span("Genie", className="model-name")], className="model-info"),
             html.Div([html.Div(error_msg, className="message-text")], className="message-content")
         ], className="bot-message message")
+        
         updated_messages = (current_messages or [])[:-1] + [error_response]
         if chat_history and len(chat_history) > 0:
             chat_history[0]["messages"] = updated_messages
+        
         return updated_messages, chat_history, {"trigger": False, "message": ""}, False, no_update
 
-# ... (Callbacks 3-8 are unchanged) ...
 # Callback 3: Toggle sidebar
 @app.callback(
     [Output("sidebar", "className"),
@@ -775,6 +919,7 @@ app.clientside_callback(
 )
 def reset_to_welcome(n1, n2, chat_history_store, chat_list):
     new_session_data = {"current_session": None, "conversation_id": None}
+    
     updated_chat_list = []
     if chat_list:
         for i, item in enumerate(chat_list):
@@ -783,10 +928,11 @@ def reset_to_welcome(n1, n2, chat_history_store, chat_list):
             )
     else:
         updated_chat_list = no_update
+    
     return ("welcome-container visible", [], {"trigger": False, "message": ""}, 
             False, new_session_data, updated_chat_list)
 
-# Callback 7: Hide welcome on chat
+# (Callback 7 removed, was redundant)
 @app.callback(
     [Output("welcome-container", "className", allow_duplicate=True)],
     [Input("chat-messages", "children")],
@@ -811,6 +957,7 @@ def hide_welcome_on_chat(chat_messages):
 def toggle_input_disabled(query_running):
     tooltip_class = "query-tooltip visible" if query_running else "query-tooltip hidden"
     return query_running, query_running, query_running, query_running, tooltip_class
+
 
 # Callback 9: Handle feedback
 @app.callback(
@@ -849,36 +996,14 @@ def handle_feedback(up_clicks, down_clicks):
     [Output({"type": "query-code", "index": MATCH}, "className"),
      Output({"type": "toggle-text", "index": MATCH}, "children")],
     [Input({"type": "toggle-query", "index": MATCH}, "n_clicks")],
-    [State({"type": "query-code", "index": MATCH}, "className")],
     prevent_initial_call=True
 )
-def toggle_query_visibility(n_clicks, current_class):
-    if n_clicks and "hidden" in current_class:
+def toggle_query_visibility(n_clicks):
+    if n_clicks and n_clicks % 2 == 1:
         return "query-code-container visible", "Hide code"
     return "query-code-container hidden", "Show code"
 
-
-# --- NEW CALLBACK: Toggle Chart Visibility ---
-@app.callback(
-    [Output({"type": "chart-container", "index": MATCH}, "className"),
-     Output({"type": "toggle-chart-text", "index": MATCH}, "children")],
-    [Input({"type": "toggle-chart", "index": MATCH}, "n_clicks")],
-    [State({"type": "chart-container", "index": MATCH}, "className")],
-    prevent_initial_call=True
-)
-def toggle_chart_visibility(n_clicks, current_class):
-    if n_clicks is None: # Initial load
-        return "query-code-container visible", "Hide Chart"
-
-    if "visible" in current_class:
-        return "query-code-container hidden", "Show Chart"
-    else:
-        return "query-code-container visible", "Hide Chart"
-# --- END NEW CALLBACK ---
-
-
-# ... (Callbacks for welcome text modal are unchanged) ...
-# Callback 12: Open welcome text modal
+# Callback 11: Open welcome text modal
 @app.callback(
     [Output("edit-welcome-modal", "is_open", allow_duplicate=True),
      Output("welcome-title-input", "value"),
@@ -901,7 +1026,7 @@ def open_modal(n_clicks, current_title, current_description, s1, s2, s3, s4):
         return [no_update] * 7
     return True, current_title, current_description, s1, s2, s3, s4
 
-# Callback 13: Save/Close welcome text modal
+# Callback 12: Save/Close welcome text modal
 @app.callback(
     [Output("welcome-title", "children", allow_duplicate=True),
      Output("welcome-description", "children", allow_duplicate=True),
@@ -927,7 +1052,9 @@ def handle_modal_actions(save_clicks, close_clicks,
     ctx = callback_context
     if not ctx.triggered:
         return [no_update] * 7
+
     trigger_id = ctx.triggered[0]["prop_id"].split(".")[0]
+
     if trigger_id == "close-modal":
         return [current_title, current_description, current_s1, current_s2, current_s3, current_s4, False]
     elif trigger_id == "save-welcome-text":
@@ -940,13 +1067,13 @@ def handle_modal_actions(save_clicks, close_clicks,
         return [title, description, *suggestions, False]
     return [no_update] * 7
 
-# Callback 14: Generate insights
+# Callback 13: Generate insights
 @app.callback(
     Output({"type": "insight-output", "index": MATCH}, "children"),
     Input({"type": "insight-button", "index": MATCH}, "n_clicks"),
-    State({"type": "insight-button", "index": MATCH}, "id"),
-    State("chat-history-store", "data"),
-    State("session-store", "data"),
+    [State({"type": "insight-button", "index": MATCH}, "id"),
+     State("chat-history-store", "data"),
+     State("session-store", "data")],
     prevent_initial_call=True
 )
 def generate_insights(n_clicks, btn_id, chat_history, session_data):
@@ -955,30 +1082,74 @@ def generate_insights(n_clicks, btn_id, chat_history, session_data):
     
     table_id = btn_id["index"]
     df = None
-    
-    current_session_index = session_data.get("current_session", 0)
-    if not chat_history or current_session_index >= len(chat_history):
-        logger.error(f"Could not find session {current_session_index} in chat history.")
-        return dcc.Markdown("Error: Could not retrieve data for insights.", className="insight-content")
 
-    df_json = chat_history[current_session_index].get('dataframes', {}).get(table_id)
-    if df_json:
-        df = pd.read_json(df_json, orient='split')
+    # --- MODIFICATION: Use session_data to find correct session ---
+    current_session_index = session_data.get("current_session", 0)
+    if current_session_index is None:
+        current_session_index = 0
+    # --- END MODIFICATION ---
+
+    if chat_history and len(chat_history) > current_session_index:
+        df_json = chat_history[current_session_index].get('dataframes', {}).get(table_id)
+        if df_json:
+            df = pd.read_json(df_json, orient='split')
             
     if df is None:
         logger.error(f"Could not find DataFrame for id {table_id} in session {current_session_index}")
         return dcc.Markdown("Error: Could not retrieve data for insights.", className="insight-content")
     
-    # --- MODIFICATION: Pass user_token ---
-    user_token = get_user_token_from_header()
-    insights = call_llm_for_insights(df, user_token=user_token)
-    # --- END MODIFICATION ---
-    
+    insights = call_llm_for_insights(df)
     return dcc.Markdown(insights, className="insight-content")
+
+# --- NEW CALLBACK ---
+# Callback 14: Toggle Data Type visibility
+@app.callback(
+    [Output({"type": "dtype-code", "index": MATCH}, "className"),
+     Output({"type": "toggle-dtype-text", "index": MATCH}, "children")],
+    [Input({"type": "toggle-dtype", "index": MATCH}, "n_clicks")],
+    prevent_initial_call=True
+)
+def toggle_dtype_visibility(n_clicks):
+    if n_clicks and n_clicks % 2 == 1:
+        return "query-code-container visible", "Hide data types"
+    return "query-code-container hidden", "Show data types"
+
+# --- NEW CALLBACK ---
+# Callback 15: Generate Visuals
+@app.callback(
+    Output({"type": "visual-output", "index": MATCH}, "children"),
+    Input({"type": "visual-button", "index": MATCH}, "n_clicks"),
+    [State({"type": "visual-button", "index": MATCH}, "id"),
+     State("chat-history-store", "data"),
+     State("session-store", "data")], # <-- Get current session
+    prevent_initial_call=True
+)
+def generate_visuals(n_clicks, btn_id, chat_history, session_data):
+    if not n_clicks:
+        return None
+        
+    table_id = btn_id["index"]
+    df = None
+    
+    # --- MODIFICATION: Use session_data to find correct session ---
+    current_session_index = session_data.get("current_session", 0)
+    if current_session_index is None:
+        current_session_index = 0
+    # --- END MODIFICATION ---
+
+    if chat_history and len(chat_history) > current_session_index:
+        df_json = chat_history[current_session_index].get('dataframes', {}).get(table_id)
+        if df_json:
+            df = pd.read_json(df_json, orient='split')
+            
+    if df is None:
+        logger.error(f"Could not find DataFrame for id {table_id} in session {current_session_index}")
+        return dcc.Markdown("Error: Could not retrieve data for visuals.", className="insight-content")
+    
+    # Call the new visualization function
+    visual_components = generate_visualizations(df)
+    return visual_components
 
 
 if __name__ == "__main__":
-    # Note: app.run_server is for development.
-    # For production, use Gunicorn: `gunicorn app:server`
     app.run_server(debug=True, host='0.0.0.0', port=8050)
-
