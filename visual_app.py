@@ -8,7 +8,7 @@ import logging # <-- ADDED
 import flask
 
 # --- MODIFICATION: Import your updated functions ---
-from genieroom import genie_query, record_feedback
+from genie_room import genie_query, record_feedback
 import pandas as pd
 import os
 from dotenv import load_dotenv
@@ -1097,9 +1097,12 @@ def generate_visual(n_clicks, btn_id, chat_history):
     
     # Call the new visual function
     visual_spec = get_visual_spec(df)
+    visual_spec = visual_spec.strip().replace("json","").replace("```","").replace("'",'"").replace("\\n","").replace("\r","")
+    
     
     # Check if the function returned a valid dict spec or an error string
-    if isinstance(visual_spec, dict):
+    if isinstance(visual_spec, str):
+        visual_spec= json.loads(visual_spec)
         # We got a valid Plotly JSON spec, render it!
         return dcc.Graph(
             figure=visual_spec,
