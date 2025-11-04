@@ -2,7 +2,7 @@ import dash
 from dash import html, dcc, Input, Output, State, callback, ALL, MATCH, callback_context, no_update, clientside_callback, dash_table
 import dash_bootstrap_components as dbc
 import json
-import logging 
+import logging # <-- ADDED
 
 # --- MODIFICATION: Import dash.flask to access request headers ---
 import flask
@@ -15,8 +15,6 @@ from dotenv import load_dotenv
 import sqlparse
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
-import plotly.express as px # <-- ADDED
-import numpy as np # <-- ADDED
 
 load_dotenv()
 # --- ADDED: Set up logger ---
@@ -221,22 +219,22 @@ app.layout = html.Div([
                         html.Button([
                             html.Div(className="suggestion-icon"),
                             html.Div(DEFAULT_SUGGESTIONS[0], 
-                                     className="suggestion-text", id="suggestion-1-text")
+                                   className="suggestion-text", id="suggestion-1-text")
                         ], id="suggestion-1", className="suggestion-button"),
                         html.Button([
                             html.Div(className="suggestion-icon"),
                             html.Div(DEFAULT_SUGGESTIONS[1],
-                                     className="suggestion-text", id="suggestion-2-text")
+                                   className="suggestion-text", id="suggestion-2-text")
                         ], id="suggestion-2", className="suggestion-button"),
                         html.Button([
                             html.Div(className="suggestion-icon"),
                             html.Div(DEFAULT_SUGGESTIONS[2],
-                                     className="suggestion-text", id="suggestion-3-text")
+                                   className="suggestion-text", id="suggestion-3-text")
                         ], id="suggestion-3", className="suggestion-button"),
                         html.Button([
                             html.Div(className="suggestion-icon"),
                             html.Div(DEFAULT_SUGGESTIONS[3],
-                                     className="suggestion-text", id="suggestion-4-text")
+                                   className="suggestion-text", id="suggestion-4-text")
                         ], id="suggestion-4", className="suggestion-button")
                     ], className="suggestion-buttons")
                 ], id="welcome-container", className="welcome-container visible"),
@@ -379,141 +377,71 @@ def get_followup_questions(user_query: str, bot_response: str) -> dict:
 # --- END NEW FUNCTION ---
 
 
-# --- NEW FUNCTION: To convert DataFrame types ---
-def convert_df_types(df: pd.DataFrame) -> pd.DataFrame:
+# --- NEW FUNCTION: To get visual spec ---
+def get_visual_spec(df: pd.DataFrame) -> dict:
     """
-    Tries to convert object columns to numeric or datetime.
+    Calls a serving endpoint to generate a Plotly JSON chart specification
+    from a DataFrame.
     """
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            # Try to convert to numeric, ignoring errors.
-            # If it fails, the column remains 'object'.
-            df[col] = pd.to_numeric(df[col], errors='ignore')
-            
-            # If it's still 'object', try to convert to datetime.
-            if df[col].dtype == 'object':
-                df[col] = pd.to_datetime(df[col], errors='ignore')
-                
-    return df
-# --- END NEW FUNCTION ---
+    # --- !!! ACTION REQUIRED !!! ---
+    # Add a new variable to your .env file:
+    # VISUAL_ENDPOINT_NAME=your-visual-model-endpoint-name
+    VISUAL_ENDPOINT_NAME = os.environ.get("VISUAL_ENDPOINT_NAME")
+    if not VISUAL_ENDPOINT_NAME:
+        logger.warning("VISUAL_ENDPOINT_NAME not set. Skipping visualization.")
+        return "Error: Visualization endpoint is not configured."
 
+    # Create a prompt with schema and sample data for the LLM
+    # This is more token-efficient than sending the whole DataFrame
+    prompt = f"""
+    You are a data visualization expert. Your task is to generate a Plotly JSON specification
+    for a chart that best visualizes the provided data.
 
-# --- NEW FUNCTION: To generate visualizations (MODIFIED) ---
-MAX_CATEGORICAL_UNIQUE = 50 # Cap for bar charts
+    Choose the most appropriate chart type (e.g., bar, line, scatter, pie) based on the
+    data's schema and content.
 
-def generate_visualizations(df: pd.DataFrame) -> list:
+    Data Schema (dtypes):
+    {df.dtypes.to_string()}
+
+    Data (first 5 rows):
+    {df.head().to_string()}
+
+    Respond ONLY with a single valid JSON object in the format:
+    {{"data": [...], "layout": {{...}}}}
     """
-    Analyzes a DataFrame and generates a list of Plotly graphs.
-    
-    --- MODIFICATION ---
-    Adds a special case for 2-column DataFrames (1 categorical, 1 numeric)
-    to plot a bivariate bar chart.
-    """
-    visuals = []
-    
-    # Base layout for small, clean charts
-    chart_layout = {
-        "margin": dict(t=30, b=20, l=30, r=20),
-        "height": 350, # Increased height slightly
-        "template": "plotly_white",
-        "title_font_size": 14,
-    }
 
-    # --- NEW: Special check for 2-column aggregated DataFrame ---
-    if len(df.columns) == 2:
-        numeric_cols = df.select_dtypes(include=np.number).columns
-        object_cols = df.select_dtypes(include=['object', 'category']).columns
+    try:
+        client = WorkspaceClient() # Uses SP env vars
         
-        # Check for the common 1-numeric, 1-categorical case
-        if len(numeric_cols) == 1 and len(object_cols) == 1:
-            numeric_col = numeric_cols[0]
-            object_col = object_cols[0]
-            
-            logger.info(f"Detected 2-column (cat/num) DataFrame. Generating bivariate bar chart for {object_col} vs {numeric_col}.")
-            
-            # Handle 1000+ rows by showing Top 50
-            if len(df) > MAX_CATEGORICAL_UNIQUE:
-                plot_df = df.nlargest(MAX_CATEGORICAL_UNIQUE, numeric_col).sort_values(by=numeric_col, ascending=False)
-                title = f"Top {MAX_CATEGORICAL_UNIQUE} '{object_col}' by '{numeric_col}'"
-            else:
-                plot_df = df.sort_values(by=numeric_col, ascending=False)
-                title = f"'{numeric_col}' by '{object_col}'"
-                
-            try:
-                # 1. The Bivariate Bar Chart you want
-                fig_bar = px.bar(plot_df, x=object_col, y=numeric_col, title=title)
-                fig_bar.update_layout(chart_layout)
-                visuals.append(html.Div([
-                    dcc.Graph(figure=fig_bar)
-                ], className="visual-item"))
-                
-                # 2. The original Histogram (still useful)
-                fig_hist = px.histogram(df, x=numeric_col, title=f"Distribution of '{numeric_col}'")
-                fig_hist.update_layout(chart_layout)
-                visuals.append(html.Div([
-                    dcc.Graph(figure=fig_hist)
-                ], className="visual-item"))
-                
-                return [html.Div(visuals, className="visual-container")] # Return early
-            except Exception as e:
-                logger.warning(f"Could not generate special 2-column chart: {e}")
-                # Fall through to default univariate logic if this fails
-    # --- END NEW CHECK ---
+        # --- !!! ACTION REQUIRED !!! ---
+        # This payload assumes a model that accepts a 'prompt'.
+        # If your model expects 'messages', change this to:
+        # request={"messages": [{"role": "user", "content": prompt}]}
+        payload = {
+            "prompt": prompt,
+            "max_tokens": 2048, # May need to be larger for complex charts
+            "temperature": 0.2
+        }
 
-    # --- Default Univariate Logic (original code) ---
-    logger.info("Using default univariate analysis for charts.")
-    for col in df.columns:
-        try:
-            col_type = df[col].dtype
-            
-            if pd.api.types.is_numeric_dtype(col_type):
-                # --- Numeric: Use a histogram ---
-                fig = px.histogram(df, x=col, title=f"Distribution of '{col}'")
-                fig.update_layout(chart_layout)
-                visuals.append(html.Div([
-                    dcc.Graph(figure=fig)
-                ], className="visual-item"))
+        response = client.serving_endpoints.query(
+            VISUAL_ENDPOINT_NAME,
+            request=payload
+        )
 
-            elif pd.api.types.is_datetime_dtype(col_type) or (np.issubdtype(col_type, np.datetime64)):
-                # --- Datetime: Use a histogram (time series count) ---
-                fig = px.histogram(df, x=col, title=f"Count over time for '{col}'")
-                fig.update_layout(chart_layout)
-                visuals.append(html.Div([
-                    dcc.Graph(figure=fig)
-                ], className="visual-item"))
+        # Parse the response. This is highly dependent on your model.
+        # This assumes the model returns: {"predictions": ["{\"data\": ...}"]}
+        if "predictions" in response and response.predictions:
+            # Clean up potential markdown/fencing
+            json_str = response.predictions[0].strip().replace("```json", "").replace("```", "")
+            data = json.loads(json_str)
+            return data # This should be the {"data": ..., "layout": ...} dict
+        else:
+            logger.warning(f"Unexpected response from visual endpoint: {response}")
+            return f"Error: Unexpected response from visual endpoint."
 
-            elif pd.api.types.is_object_dtype(col_type) or pd.api.types.is_categorical_dtype(col_type):
-                # --- Categorical/Object: Use a bar chart of value counts ---
-                unique_count = df[col].nunique()
-                
-                if unique_count == 0 or unique_count > (df.shape[0] * 0.9):
-                    # Skip columns that are all unique (like IDs) or all null
-                    continue
-
-                if unique_count > MAX_CATEGORICAL_UNIQUE:
-                    # Too many unique values, plot top N
-                    top_n = df[col].value_counts().nlargest(MAX_CATEGORICAL_UNIQUE).reset_index()
-                    top_n.columns = [col, 'count']
-                    title = f"Top {MAX_CATEGORICAL_UNIQUE} values for '{col}' (of {unique_count})"
-                    fig = px.bar(top_n, x=col, y='count', title=title)
-                else:
-                    # Few enough unique values, plot all
-                    title = f"Value counts for '{col}'"
-                    # Use histogram to let plotly do the value counting
-                    fig = px.histogram(df, x=col, title=title).update_xaxes(categoryorder='total descending')
-                
-                fig.update_layout(chart_layout)
-                visuals.append(html.Div([
-                    dcc.Graph(figure=fig)
-                ], className="visual-item"))
-        
-        except Exception as e:
-            logger.warning(f"Could not generate visual for column {col}: {e}")
-
-    if not visuals:
-        return [html.Div("Could not generate any automatic visuals for this dataset.", className="insight-content")]
-        
-    return [html.Div(visuals, className="visual-container")]
+    except Exception as e:
+        logger.error(f"Error getting visual spec: {e}")
+        return f"Error getting visual spec: {str(e)}"
 # --- END NEW FUNCTION ---
 
 
@@ -698,21 +626,13 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
             content = dcc.Markdown(response, className="message-text")
             response_text_for_context = response
         else:
-            # --- THIS IS THE START OF THE MODIFIED BLOCK ---
             df = pd.DataFrame(response)
+            df_id = f"table-{len(chat_history)}-{len(current_messages)}"
             
-            # --- MODIFICATION: Use a consistent index for all related components ---
-            content_index = f"{len(chat_history)}-{len(current_messages)}"
-            df_id = f"table-{content_index}"
-            # --- END MODIFICATION ---
-
             if chat_history and len(chat_history) > 0:
                 chat_history[0].setdefault('dataframes', {})[df_id] = df.to_json(orient='split')
             else:
-                # This case might be problematic, ensure chat_history[0] exists
-                if not chat_history:
-                    chat_history = [{"dataframes": {}}] 
-                chat_history[0].setdefault('dataframes', {})[df_id] = df.to_json(orient='split')
+                chat_history = [{"dataframes": {df_id: df.to_json(orient='split')}}]
             
             data_table = dash_table.DataTable(
                 id=df_id, data=df.to_dict('records'),
@@ -724,12 +644,10 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 style_data={'whiteSpace': 'normal', 'height': 'auto'},
                 fill_width=False
             )
-            
             query_section = None
             if query_text is not None:
                 formatted_sql = format_sql_query(query_text)
-                # --- MODIFICATION: Use content_index ---
-                query_index = content_index 
+                query_index = f"{len(chat_history)}-{len(current_messages)}"
                 query_section = html.Div([
                     html.Div([
                         html.Button([
@@ -742,21 +660,6 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                     )
                 ], id={"type": "query-section", "index": query_index}, className="query-section")
             
-            # --- NEW: Add Data Type Toggle Section ---
-            dtype_index = content_index
-            data_type_section = html.Div([
-                html.Div([
-                    html.Button([
-                        html.Span("Show data types", id={"type": "toggle-dtype-text", "index": dtype_index})
-                    ], id={"type": "toggle-dtype", "index": dtype_index}, className="toggle-query-button", n_clicks=0)
-                ], className="toggle-query-container"),
-                html.Div(
-                    html.Pre(df.dtypes.to_string(), className="sql-code"), # Reuse 'sql-code' style
-                    id={"type": "dtype-code", "index": dtype_index}, className="query-code-container hidden"
-                )
-            ], className="query-section", style={"marginTop": "5px"})
-            # --- END NEW ---
-
             insight_button = html.Button(
                 "Generate Insights",
                 id={"type": "insight-button", "index": df_id},
@@ -769,32 +672,34 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
                 children=html.Div(id={"type": "insight-output", "index": df_id})
             )
 
-            # --- NEW: Add Visuals Button and Output ---
+            # --- MODIFICATION: Add visual button and output ---
             visual_button = html.Button(
-                "Generate Visuals",
+                "Generate Visual",
                 id={"type": "visual-button", "index": df_id},
-                className="insight-button",
-                style={"border": "none", "background": "#f0f0f0", "padding": "8px 16px", "borderRadius": "4px", "cursor": "pointer", "marginLeft": "10px"} # Add space
+                className="insight-button", # Reuse same style
+                # Add a small margin to separate it from the insights button
+                style={"border": "none", "background": "#f0f0f0", "padding": "8px 16px", "borderRadius": "4px", "cursor": "pointer", "marginLeft": "10px"}
             )
             visual_output = dcc.Loading(
                 id={"type": "visual-loading", "index": df_id},
                 type="circle",
                 children=html.Div(id={"type": "visual-output", "index": df_id})
             )
-            # --- END NEW ---
 
+            # --- MODIFICATION: Create a button container and add all components ---
+            button_container = html.Div([
+                insight_button,
+                visual_button # <-- ADDED
+            ], style={"display": "flex", "marginTop": "10px"})
+            
             content = html.Div([
                 html.Div(data_table, style={'marginBottom': '20px', 'paddingRight': '5px'}),
                 query_section if query_section else None,
-                data_type_section, # <-- ADDED
-                html.Div([ # Wrapper for buttons
-                    insight_button,
-                    visual_button, # <-- ADDED
-                ], style={"marginTop": "10px", "display": "flex"}),
+                button_container,   # <-- MODIFIED (was just insight_button)
                 insight_output,
-                visual_output, # <-- ADDED
+                visual_output,      # <-- ADDED
             ])
-            # --- THIS IS THE END OF THE MODIFIED BLOCK ---
+            # --- END MODIFICATION ---
 
             response_text_for_context = f"A table was returned for the query: {query_text}"
 
@@ -1136,87 +1041,77 @@ def handle_modal_actions(save_clicks, close_clicks,
 @app.callback(
     Output({"type": "insight-output", "index": MATCH}, "children"),
     Input({"type": "insight-button", "index": MATCH}, "n_clicks"),
-    [State({"type": "insight-button", "index": MATCH}, "id"),
-     State("chat-history-store", "data"),
-     State("session-store", "data")],
+    State({"type": "insight-button", "index": MATCH}, "id"),
+    State("chat-history-store", "data"),
     prevent_initial_call=True
 )
-def generate_insights(n_clicks, btn_id, chat_history, session_data):
+def generate_insights(n_clicks, btn_id, chat_history):
     if not n_clicks:
         return None
-    
     table_id = btn_id["index"]
     df = None
-
-    # --- MODIFICATION: Use session_data to find correct session ---
-    current_session_index = session_data.get("current_session", 0)
-    if current_session_index is None:
-        current_session_index = 0
-    # --- END MODIFICATION ---
-
-    if chat_history and len(chat_history) > current_session_index:
+    if chat_history and len(chat_history) > 0:
+        # Find the correct session in chat_history
+        current_session_index = 0 # This assumes insights are only for the latest chat[0]
+        # A more robust solution would be to get current_session from a store
+        
         df_json = chat_history[current_session_index].get('dataframes', {}).get(table_id)
         if df_json:
             df = pd.read_json(df_json, orient='split')
             
     if df is None:
-        logger.error(f"Could not find DataFrame for id {table_id} in session {current_session_index}")
+        logger.error(f"Could not find DataFrame for id {table_id}")
         return dcc.Markdown("Error: Could not retrieve data for insights.", className="insight-content")
     
     insights = call_llm_for_insights(df)
     return dcc.Markdown(insights, className="insight-content")
 
 # --- NEW CALLBACK ---
-# Callback 14: Toggle Data Type visibility
-@app.callback(
-    [Output({"type": "dtype-code", "index": MATCH}, "className"),
-     Output({"type": "toggle-dtype-text", "index": MATCH}, "children")],
-    [Input({"type": "toggle-dtype", "index": MATCH}, "n_clicks")],
-    prevent_initial_call=True
-)
-def toggle_dtype_visibility(n_clicks):
-    if n_clicks and n_clicks % 2 == 1:
-        return "query-code-container visible", "Hide data types"
-    return "query-code-container hidden", "Show data types"
-
-# --- NEW CALLBACK (MODIFIED) ---
-# Callback 15: Generate Visuals
+# Callback 14: Generate visual
 @app.callback(
     Output({"type": "visual-output", "index": MATCH}, "children"),
     Input({"type": "visual-button", "index": MATCH}, "n_clicks"),
-    [State({"type": "visual-button", "index": MATCH}, "id"),
-     State("chat-history-store", "data"),
-     State("session-store", "data")], # <-- Get current session
+    State({"type": "visual-button", "index": MATCH}, "id"),
+    State("chat-history-store", "data"),
     prevent_initial_call=True
 )
-def generate_visuals(n_clicks, btn_id, chat_history, session_data):
+def generate_visual(n_clicks, btn_id, chat_history):
     if not n_clicks:
         return None
         
     table_id = btn_id["index"]
     df = None
     
-    # --- MODIFICATION: Use session_data to find correct session ---
-    current_session_index = session_data.get("current_session", 0)
-    if current_session_index is None:
-        current_session_index = 0
-    # --- END MODIFICATION ---
-
-    if chat_history and len(chat_history) > current_session_index:
+    if chat_history and len(chat_history) > 0:
+        # Find the correct session in chat_history
+        current_session_index = 0 # This assumes insights are only for the latest chat[0]
+        # A more robust solution would be to get current_session from a store
+        
         df_json = chat_history[current_session_index].get('dataframes', {}).get(table_id)
         if df_json:
             df = pd.read_json(df_json, orient='split')
             
-            # --- !!! ADDED THIS LINE TO FIX DTYPES !!! ---
-            df = convert_df_types(df)
-            
     if df is None:
-        logger.error(f"Could not find DataFrame for id {table_id} in session {current_session_index}")
-        return dcc.Markdown("Error: Could not retrieve data for visuals.", className="insight-content")
+        logger.error(f"Could not find DataFrame for id {table_id}")
+        return dcc.Markdown("Error: Could not retrieve data for visualization.", className="insight-content")
     
-    # Call the new visualization function
-    visual_components = generate_visualizations(df)
-    return visual_components
+    # Call the new visual function
+    visual_spec = get_visual_spec(df)
+    
+    # Check if the function returned a valid dict spec or an error string
+    if isinstance(visual_spec, dict):
+        # We got a valid Plotly JSON spec, render it!
+        return dcc.Graph(
+            figure=visual_spec,
+            # Set a default height and make it responsive
+            style={'width': '95%', 'height': '400px'},
+            config={'responsive': True}
+        )
+    else:
+        # It's an error string, display it
+        logger.error(f"Failed to generate visual spec: {visual_spec}")
+        return dcc.Markdown(f"Error generating visual: {visual_spec}", className="insight-content")
+# --- END NEW CALLBACK ---
 
 
 if __name__ == "__main__":
