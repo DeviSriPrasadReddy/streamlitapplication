@@ -1,0 +1,67 @@
+# This YAML defines all resources for the app:
+# 1. A SQL Warehouse for the Genie Space to use.
+# 2. The Model Serving Endpoint (for general AI).
+# 3. The Genie Space (for natural language-to-SQL).
+# 4. The App, with permissions for all resources.
+
+resources:
+  # 1. THE SQL WAREHOUSE (Compute for Genie Space)
+  # A Genie Space needs a SQL warehouse to run its queries.
+  sql_warehouses:
+    my_app_warehouse:
+      name: "genie-app-warehouse"
+      cluster_size: "Small"
+      auto_stop_mins: 10
+
+  # 2. THE AI MODEL ENDPOINT (What the App will call for GenAI)
+  model_serving_endpoints:
+    genie_model_endpoint:
+      name: "genie-assistant-endpoint"
+      config:
+        served_models:
+          - name: "dbrx-instruct"
+            model_name: "databricks-dbrx-instruct"
+            scale_to_zero_enabled: true
+            workload_size: "Small"
+
+  # 3. THE GENIE SPACE (What the App will call for AI/BI)
+  # This is the AI/BI tool for natural language-to-SQL.
+  # It must be linked to a SQL warehouse.
+  genie_spaces:
+    my_bi_space:
+      name: "sales-bi-genie-space"
+      # This links the Genie Space to the warehouse defined above
+      sql_warehouse_id: ${resources.sql_warehouses.my_app_warehouse.id}
+      # You would also add table/view names here in the UI
+      # or sync them if they are defined in the schema.
+
+  # 4. THE WEB APP (What the user will see)
+  apps:
+    genie_api_app:
+      name: "genie_chat_interface"
+      description: "A chatbot app that calls the DBRX model AND the Genie BI Space."
+      source_code_path: ../src/genie_chat_app
+
+      # --- CRITICAL PART ---
+      # Granting permissions to all necessary resources.
+      resources:
+        # Permission 1: For the Model Serving Endpoint
+        - name: "ai-model-access"
+          description: "Allow this app to query the DBRX model."
+          model_serving_endpoint:
+            id: ${resources.model_serving_endpoints.genie_model_endpoint.id}
+            permission: "CAN_QUERY"
+
+        # Permission 2: For the Genie Space (AI/BI Tool)
+        - name: "genie-space-access"
+          description: "Allow this app to run queries on the Genie Space."
+          genie_space:
+            id: ${resources.genie_spaces.my_bi_space.id}
+            permission: "CAN_RUN" # CAN_RUN lets the app submit queries
+
+        # Permission 3: For the SQL Warehouse
+        - name: "warehouse-access"
+          description: "Allow the app to use the warehouse for Genie Space queries."
+          sql_warehouse:
+            id: ${resources.sql_warehouses.my_app_warehouse.id}
+            permission: "CAN_USE" # CAN_USE lets the app run compute
