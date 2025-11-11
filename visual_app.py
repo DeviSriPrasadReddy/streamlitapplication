@@ -29,7 +29,7 @@ def get_user_token_from_header():
         # --- !!!  ACTION REQUIRED  !!! ---
         # You may need to change this header name.
         # Common names: 'X-Databricks-User-Token', 'X-Forwarded-Access-Token'
-        header_name = 'X-Databricks-User-Token'
+        header_name = 'X-Forwarded-Access-Token'
         token = flask.request.headers.get(header_name)
         
         if token:
@@ -48,7 +48,7 @@ def get_user_token_from_header():
 # Create Dash app
 app = dash.Dash(
     __name__,
-    external_stylesheets=[dbc.themes.BOOTSTRAP]
+    external_stylesheets=[dbc.themes.BOOTSTRAP],title ="GENIE AI"
 )
 server = app.server # Expose server for Gunicorn
 
@@ -386,7 +386,7 @@ def get_visual_spec(df: pd.DataFrame) -> dict:
     # --- !!! ACTION REQUIRED !!! ---
     # Add a new variable to your .env file:
     # VISUAL_ENDPOINT_NAME=your-visual-model-endpoint-name
-    VISUAL_ENDPOINT_NAME = os.environ.get("VISUAL_ENDPOINT_NAME")
+    VISUAL_ENDPOINT_NAME = os.environ.get("SERVING_ENDPOINT_NAME")
     if not VISUAL_ENDPOINT_NAME:
         logger.warning("VISUAL_ENDPOINT_NAME not set. Skipping visualization.")
         return "Error: Visualization endpoint is not configured."
@@ -405,7 +405,13 @@ def get_visual_spec(df: pd.DataFrame) -> dict:
 
     Data (first 5 rows):
     {df.head().to_string()}
-
+    CRITICAL RULES: 
+    1: Your response MUST be a single valid JSON object
+    2: Do NOT include any text, preamble, explanation, or conversational phrases.
+    3. DO NOT include Markdown fences or code blocks 
+    4. The JSON must be perfectly valid and parasable 
+    5. The reponse must start with '{{' and end with '}}'. 
+        
     Respond ONLY with a single valid JSON object in the format:
     {{"data": [...], "layout": {{...}}}}
     """
@@ -413,31 +419,14 @@ def get_visual_spec(df: pd.DataFrame) -> dict:
     try:
         client = WorkspaceClient() # Uses SP env vars
         
-        # --- !!! ACTION REQUIRED !!! ---
-        # This payload assumes a model that accepts a 'prompt'.
-        # If your model expects 'messages', change this to:
-        # request={"messages": [{"role": "user", "content": prompt}]}
-        payload = {
-            "prompt": prompt,
-            "max_tokens": 2048, # May need to be larger for complex charts
-            "temperature": 0.2
-        }
+
 
         response = client.serving_endpoints.query(
             VISUAL_ENDPOINT_NAME,
-            request=payload
+            messages=[ChatMessage(context=prompt,role= ChatMessageRole.USER)]
         )
 
-        # Parse the response. This is highly dependent on your model.
-        # This assumes the model returns: {"predictions": ["{\"data\": ...}"]}
-        if "predictions" in response and response.predictions:
-            # Clean up potential markdown/fencing
-            json_str = response.predictions[0].strip().replace("```json", "").replace("```", "")
-            data = json.loads(json_str)
-            return data # This should be the {"data": ..., "layout": ...} dict
-        else:
-            logger.warning(f"Unexpected response from visual endpoint: {response}")
-            return f"Error: Unexpected response from visual endpoint."
+        return response.choices[0].message.content
 
     except Exception as e:
         logger.error(f"Error getting visual spec: {e}")
@@ -461,7 +450,6 @@ def get_visual_spec(df: pd.DataFrame) -> dict:
      Input("suggestion-4", "n_clicks"),
      Input("send-button-fixed", "n_clicks"),
      Input("chat-input-fixed", "n_submit"),
-     # --- MODIFICATION: Add new Input for follow-up suggestions ---
      Input({"type": "followup-suggestion", "index": ALL}, "n_clicks")],
     [State("suggestion-1-text", "children"),
      State("suggestion-2-text", "children"),
@@ -496,7 +484,6 @@ def handle_all_inputs(s1_clicks, s2_clicks, s3_clicks, s4_clicks, send_clicks, s
     
     user_input = None
 
-    # --- MODIFICATION: Check for follow-up suggestion clicks first ---
     if "followup-suggestion" in trigger_id_str:
         try:
             # User clicked one of the new follow-up buttons
@@ -703,7 +690,7 @@ def get_model_response(trigger_data, current_messages, chat_history, session_dat
 
             response_text_for_context = f"A table was returned for the query: {query_text}"
 
-        # --- MODIFICATION: Get follow-up questions ---
+      
         
         # Define inline styles for the new suggestion buttons
         pill_style = {
