@@ -1,0 +1,61 @@
+graph TD
+    %% --- STYLING ---
+    classDef user fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:black;
+    classDef router fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:black;
+    classDef genie fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:black;
+    classDef visual fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:black;
+
+    %% --- LANE 1: UI ---
+    subgraph UI_Layer [USER INTERFACE]
+        direction TB
+        Start([1. User Asks Question])
+        Render([7. Render Dashboard])
+        InsightButton{User Clicks<br/>Insights?}
+    end
+
+    %% --- LANE 2: ROUTER LLM ---
+    subgraph Router_Layer [STEP 2: LLM ROUTER]
+        direction TB
+        AnalyzeReq[Analyze User Request]
+        SelectGenie[Decide Genie Space<br/>Based on Context]
+    end
+
+    %% --- LANE 3: GENIE SPACE ---
+    subgraph Genie_Layer [STEP 3: GENIE SPACE API]
+        direction TB
+        CallAPI[Call Selected Genie API]
+        ReturnData[Return SQL & Dataframe]
+    end
+
+    %% --- LANE 4: VISUAL/INSIGHT LLM ---
+    subgraph Vis_Layer [STEPS 4-6: VISUALIZATION LLM]
+        direction TB
+        GenVis[6. Generate Visuals Code]
+        GenInsight[Generate Text Insights]
+    end
+
+    %% --- LOGIC FLOW ---
+    Start --> AnalyzeReq
+    AnalyzeReq --> SelectGenie
+    
+    %% Router picks the specific Genie
+    SelectGenie --> CallAPI
+    CallAPI --> ReturnData
+    
+    %% Data comes back, always generate visuals
+    ReturnData --> GenVis
+    
+    %% Parallel Path: Insights (Optional)
+    ReturnData -.-> InsightButton
+    InsightButton -- YES --> GenInsight
+    GenInsight --> Render
+    InsightButton -- NO --> Render
+    
+    %% Visuals merge to render
+    GenVis --> Render
+
+    %% --- APPLY STYLES ---
+    class Start,Render,InsightButton user;
+    class AnalyzeReq,SelectGenie router;
+    class CallAPI,ReturnData genie;
+    class GenVis,GenInsight visual;
