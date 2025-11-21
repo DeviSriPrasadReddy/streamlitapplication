@@ -1,0 +1,45 @@
+graph TD
+    %% --- STYLING ---
+    classDef userNode fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:black;
+    classDef genieNode fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:black;
+    classDef llmNode fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:black;
+    
+    %% --- LANE 1: USER APP ---
+    subgraph User_App [USER INTERFACE]
+        direction TB
+        Start([1. User Asks Question])
+        Display([Display Final Dashboard])
+    end
+
+    %% --- LANE 2: GENIE SPACE ---
+    subgraph Genie_Space [GENIE SPACE API]
+        direction TB
+        GenieProcess[2. Convert NL to SQL]
+        GenieData[3. Return SQL & Dataframe]
+    end
+
+    %% --- LANE 3: LLM ---
+    subgraph LLM_Service [LLM SERVICE]
+        direction TB
+        CheckInsights{4. User wants Insights?}
+        MakeInsights[Generate Text Insights]
+        MakeVisuals[5. Generate Visuals Code]
+    end
+
+    %% --- CONNECTIONS ---
+    Start --> GenieProcess
+    GenieProcess --> GenieData
+    GenieData --> CheckInsights
+    
+    %% Logic Path
+    CheckInsights -- YES --> MakeInsights
+    MakeInsights --> MakeVisuals
+    CheckInsights -- NO --> MakeVisuals
+    
+    %% Return to User
+    MakeVisuals --> Display
+
+    %% --- APPLY STYLES ---
+    class Start,Display userNode;
+    class GenieProcess,GenieData genieNode;
+    class CheckInsights,MakeInsights,MakeVisuals llmNode;
