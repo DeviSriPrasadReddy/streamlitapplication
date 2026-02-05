@@ -1,0 +1,59 @@
+Thanks for that correction! That clarifies the pipeline significantly. Since **FCRP** is also accessed via the federated catalog and **Databricks** is the engine doing the heavy lifting for the Snowflake write, we can tighten up the architecture.
+
+Essentially, Databricks is acting as your primary compute engine and "traffic controller" for all three sources.
+
+---
+
+## Updated Architecture Flow
+
+### 1. Ingestion & Integration
+
+* **Source 1: Netezza** – Data is loaded into Databricks (likely as a staging Parquet/Delta layer or directly into memory).
+* **Source 2 & 3: FCRP & IWM Oracle** – These are accessed via **Federated Catalogs**. This is efficient because you aren't moving the data until the Spark job actually requests it for the transformation.
+
+### 2. Transformation (The 4 SQL Scripts)
+
+* The scripts run in **Databricks Spark SQL**.
+* They join the Netezza "loaded" data with the "live" Federated data from FCRP and Oracle.
+
+### 3. Dual-Output Logic (Current STG Phase)
+
+Your Spark job should be configured with a "double-write" or "sequential-write" pattern:
+
+1. **Write 1:** Save the results to **S3/ADLS** in **Iceberg format**. This builds your long-term PRD foundation.
+2. **Write 2:** Use the `spark.write.format("snowflake")` connector to push those same dataframes into **Snowflake STG**.
+
+---
+
+## Implementation Strategy
+
+### Stage 1: The "Push" Model (Current)
+
+During the validation phase, Databricks remains the "Writer."
+
+* **Pros:** Easy to set up; Snowflake users get a standard table.
+* **Cons:** You pay for egress/transfer and Snowflake storage.
+
+### Stage 2: The "Open" Model (Target PRD)
+
+Once stakeholders approve the data in Snowflake STG, you stop the Snowflake Spark write. Instead, you keep the Iceberg write in Databricks and:
+
+1. **Create an External Volume** in Snowflake pointing to your Iceberg storage.
+2. **Create Iceberg Tables** in Snowflake using the `BASE_LOCATION` and `METADATA_FILE_PATH`.
+
+> **Peer Tip:** Ensure your Databricks cluster is using a consistent version of the Iceberg library that matches Snowflake’s supported Iceberg features (currently supporting Apache Iceberg v1.2+ in most regions).
+
+---
+
+## Comparison of Storage Approaches
+
+| Feature | Phase 1 (Snowflake STG) | Phase 2 (Iceberg PRD) |
+| --- | --- | --- |
+| **Data Ownership** | Managed by Snowflake | Managed by You (S3/ADLS) |
+| **Storage Cost** | Snowflake Storage Rates | Cloud Provider (S3/Blob) Rates |
+| **Performance** | High (Native) | High (Metadata-based) |
+| **Maintenance** | Auto-managed by Snowflake | Managed via Databricks maintenance (Vacuum/Optimize) |
+
+---
+
+**Would you like me to provide the specific SQL syntax for creating the Snowflake Iceberg table once your Databricks job has finished writing the files?**
